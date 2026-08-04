@@ -1,0 +1,72 @@
+"""
+backend/config.py
+
+Central configuration for the Nebula AI Banking Assistant.
+Loads environment variables and defines model/hardware constants
+per PRD §1.2 and §2.2.
+"""
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+# ---------------------------------------------------------------------------
+# Local LLM (primary chat model) — served via Ollama
+# ---------------------------------------------------------------------------
+# VRAM-safe default. Only switch to the 7B stretch model after the Day-1
+# nvidia-smi + benchmark step in the PRD confirms acceptable offloaded
+# latency (~3-4s). Do not assume 7B works without measuring first.
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+PRIMARY_LLM_MODEL = os.getenv("PRIMARY_LLM_MODEL", "qwen2.5:3b-instruct-q4_K_M")
+STRETCH_LLM_MODEL = os.getenv("STRETCH_LLM_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+
+# ---------------------------------------------------------------------------
+# Groq Cloud — reasoning / handover-summary tier only (§4.3), never on the
+# live conversational hot path.
+# ---------------------------------------------------------------------------
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_HANDOVER_MODEL = os.getenv("GROQ_HANDOVER_MODEL", "llama-3.3-70b-versatile")
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "qwen-2.5-72b")
+
+# ---------------------------------------------------------------------------
+# Embeddings + Vector DB (§2.4) — CPU-bound regardless of GPU vendor.
+# ---------------------------------------------------------------------------
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-en-v1.5")
+EMBEDDING_DIM = 384
+
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "data/chroma_db")
+CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "banking_policy_kb")
+
+# ---------------------------------------------------------------------------
+# Sandbox / mock banking DB (§4.4)
+# ---------------------------------------------------------------------------
+SANDBOX_DB_PATH = os.getenv("SANDBOX_DB_PATH", "data/sandbox.db")
+
+# ---------------------------------------------------------------------------
+# Knowledge base ingestion source
+# ---------------------------------------------------------------------------
+KNOWLEDGE_BASE_DIR = os.getenv("KNOWLEDGE_BASE_DIR", "data/knowledge_base")
+
+# ---------------------------------------------------------------------------
+# Responsible AI thresholds (§4.2) — confidence decision matrix
+# ---------------------------------------------------------------------------
+CONFIDENCE_WEIGHTS = {
+    "retrieval": 0.4,
+    "grounding": 0.4,
+    "intent": 0.2,
+}
+CONFIDENCE_AUTO_EXECUTE_THRESHOLD = 0.65
+CONFIDENCE_CLARIFY_THRESHOLD = 0.50
+# C >= 0.65               -> automated execution & direct response
+# 0.50 <= C < 0.65        -> clarification loop
+# C < 0.50                -> automated human handover
+
+UNCLEAR_ATTEMPTS_HANDOVER_LIMIT = 2  # §4.3 trigger 2: low confidence twice consecutively
+
+# ---------------------------------------------------------------------------
+# FastAPI
+# ---------------------------------------------------------------------------
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "8000"))
