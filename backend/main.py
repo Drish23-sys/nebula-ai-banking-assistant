@@ -123,12 +123,23 @@ def _draft_reply(result: Dict[str, Any], user_message: str) -> str:
     return "Could you tell me a bit more about what you need help with?"
 
 
+# Below this similarity, a retrieved chunk is noise, not a real citation
+# — e.g. for the $10k+ wire fee question, top-3 retrieval also pulls in
+# "Domestic Wire Transfers" (0.785) and "Daily Transfer Limits" (0.66),
+# which are topically adjacent but not what actually answered the
+# question. Only the top match (0.86) should be cited.
+CITATION_MIN_SIMILARITY = 0.75
+
+
 def _build_citations(result: Dict[str, Any]) -> List[Dict[str, str]]:
     retrieved_docs = result.get("retrieved_docs", []) or []
     return [
         {"source": d["source"], "section": d["section"]}
         for d in retrieved_docs
-        if isinstance(d, dict) and "source" in d and "section" in d
+        if isinstance(d, dict)
+        and "source" in d
+        and "section" in d
+        and d.get("similarity", 0) >= CITATION_MIN_SIMILARITY
     ]
 
 

@@ -145,7 +145,7 @@ def rag_node(state: AgentState) -> Dict[str, Any]:
         import chromadb
         from fastembed import TextEmbedding
 
-        client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+        client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR, settings=chromadb.config.Settings(anonymized_telemetry=False))
         collection = client.get_collection(CHROMA_COLLECTION_NAME)
 
         embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")

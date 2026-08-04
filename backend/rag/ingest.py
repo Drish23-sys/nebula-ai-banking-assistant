@@ -21,6 +21,7 @@ import re
 import sys
 
 import chromadb
+from chromadb.config import Settings
 from fastembed import TextEmbedding
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -85,7 +86,7 @@ def build_collection(
 ) -> chromadb.Collection:
     os.makedirs(persist_dir, exist_ok=True)
 
-    client = chromadb.PersistentClient(path=persist_dir)
+    client = chromadb.PersistentClient(path=persist_dir, settings=Settings(anonymized_telemetry=False))
 
     if reset:
         try:
@@ -124,7 +125,7 @@ def build_collection(
 def query_collection(query: str, top_k: int = 3, persist_dir: str = CHROMA_PERSIST_DIR,
                       collection_name: str = CHROMA_COLLECTION_NAME):
     """Quick sanity-check retrieval helper — mirrors what rag_node will do in Day 2."""
-    client = chromadb.PersistentClient(path=persist_dir)
+    client = chromadb.PersistentClient(path=persist_dir, settings=Settings(anonymized_telemetry=False))
     collection = client.get_collection(collection_name)
 
     embedder = TextEmbedding(model_name=FASTEMBED_MODEL_NAME)
