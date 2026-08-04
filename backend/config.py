@@ -11,6 +11,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Must be set before chromadb is imported anywhere (config.py is imported
+# first by every module that eventually touches chromadb). Settings(
+# anonymized_telemetry=False) passed at Client construction time doesn't
+# fully suppress it in chromadb==0.5.18 — there's a known posthog
+# capture() signature mismatch bug that fires regardless unless this env
+# var is set before import. Harmless either way, just noisy in logs.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+
 
 # ---------------------------------------------------------------------------
 # Local LLM (primary chat model) — served via Ollama
