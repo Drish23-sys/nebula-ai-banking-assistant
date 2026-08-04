@@ -29,6 +29,7 @@ from backend import session_store  # noqa: E402
 from backend.agent.graph import compiled_graph  # noqa: E402
 from backend.agent.state import new_state  # noqa: E402
 from backend.config import API_HOST, API_PORT  # noqa: E402
+from backend.llm_client import generate_reply  # noqa: E402
 
 app = FastAPI(title="Nebula AI Banking Assistant")
 
@@ -81,14 +82,13 @@ def _infer_trigger_reason(active_intent: str, last_user_text: str) -> str:
     return "low_confidence_repeated"
 
 
-def _draft_reply(result: Dict[str, Any]) -> str:
+def _draft_reply(result: Dict[str, Any], user_message: str) -> str:
     """
-    Deterministic reply text from tool/RAG results.
-
-    TODO(Day 4+): replace with a real Ollama generation call that turns
-    tool_result / retrieved_docs into natural language. Kept template-
-    based for now so the full API contract, confidence routing, and
-    handover flow can be exercised end-to-end without a live LLM server.
+    Tries a real Ollama-generated reply first, grounded in this turn's
+    tool_result / retrieved_docs. Falls back to the deterministic
+    template (same one used since Day 3) if Ollama isn't reachable —
+    generate_reply() never raises, it returns None on any failure, so
+    this function always returns *something* sensible either way.
     """
     intent = result.get("active_intent", "")
 
@@ -96,14 +96,26 @@ def _draft_reply(result: Dict[str, Any]) -> str:
         return "I'm connecting you with a human support specialist who can help with this right away."
 
     tool_calls = result.get("tool_calls", [])
-    if tool_calls:
-        last_call = tool_calls[-1]
-        tool_result = last_call.get("result", {})
-        if tool_result.get("status") == "success":
-            return tool_result.get("message", "Done.")
-        return tool_result.get("message", "I ran into an issue completing that — let me connect you with support.")
-
+    last_tool_result = tool_calls[-1]["result"] if tool_calls else None
     retrieved_docs = result.get("retrieved_docs", [])
+
+    # A failed tool call (e.g. Pydantic validation error, no account
+    # found) shouldn't be dressed up by the LLM — surface it directly
+    # and plainly rather than risking a generated response that papers
+    # over the error.
+    if last_tool_result and last_tool_result.get("status") == "error":
+        return last_tool_result.get("message", "I ran into an issue completing that — let me connect you with support.")
+
+    generated = generate_reply(
+        user_message=user_message, tool_result=last_tool_result, retrieved_docs=retrieved_docs
+    )
+    if generated:
+        return generated
+
+    # --- Fallback template (Ollama unreachable) ---
+    if last_tool_result:
+        return last_tool_result.get("message", "Done.")
+
     valid_docs = [d for d in retrieved_docs if isinstance(d, dict) and "text" in d]
     if valid_docs:
         return valid_docs[0]["text"]
@@ -150,7 +162,7 @@ def chat(req: ChatRequest) -> ChatResponse:
     config = {"configurable": {"thread_id": req.session_id}}
     result = compiled_graph.invoke(graph_state, config=config)
 
-    reply_text = _draft_reply(result)
+    reply_text = _draft_reply(result, req.message)
     handover_triggered = bool(result.get("is_handover_active"))
 
     if handover_triggered:
