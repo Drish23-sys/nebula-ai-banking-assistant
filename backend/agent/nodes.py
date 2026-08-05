@@ -272,39 +272,42 @@ def confidence_node(state: AgentState) -> Dict[str, Any]:
 
 def handover_node(state: AgentState) -> Dict[str, Any]:
     """
-    Builds the handover summary. Field names match the exact 4-part
-    shape already promised to the frontend team in
-    docs/FRONTEND_HANDOFF.md §1 (`GET /agent/queue` -> ticket.summary):
+    Builds the handover summary. Tries a real Groq call first (via
+    backend/groq_client.py); falls back to the deterministic template
+    if Groq isn't configured/reachable. Field names are frozen either
+    way, matching docs/FRONTEND_HANDOFF.md §1 exactly:
         issue, context, attempted_resolution, suggested_next_step
-
-    TODO(Day 4/later today): replace this deterministic template with a
-    real Groq call (PRD §4.3) that reads the full conversation and
-    tool_calls history to write a genuinely useful summary. Keeping the
-    field names fixed now means that swap is a body-only change here —
-    main.py and the frontend don't need to change at all when it lands.
     """
+    from backend.groq_client import generate_handover_summary  # local import: keeps nodes.py importable without groq installed, mirrors tool_node's pattern
+
     intent = state.get("active_intent", "UNKNOWN")
     tool_calls = state.get("tool_calls", [])
     messages = state.get("messages", [])
 
-    last_user_text = ""
-    for m in reversed(messages):
-        if getattr(m, "type", None) == "human" or m.__class__.__name__ == "HumanMessage":
-            last_user_text = getattr(m, "content", "")
-            break
-
-    attempted = (
-        f"AI attempted {len(tool_calls)} tool call(s) before escalating."
-        if tool_calls
-        else "AI had not yet taken any action before escalating."
+    summary = generate_handover_summary(
+        messages=messages, tool_calls=tool_calls, active_intent=intent, user_id=state["user_id"]
     )
 
-    summary = {
-        "issue": last_user_text or f"Customer request classified as {intent}.",
-        "context": f"Session for user {state['user_id']}, classified intent: {intent}.",
-        "attempted_resolution": attempted,
-        "suggested_next_step": "Review conversation history and verify customer identity before proceeding.",
-    }
+    if summary is None:
+        # --- Fallback template (Groq unreachable/not configured) ---
+        last_user_text = ""
+        for m in reversed(messages):
+            if getattr(m, "type", None) == "human" or m.__class__.__name__ == "HumanMessage":
+                last_user_text = getattr(m, "content", "")
+                break
+
+        attempted = (
+            f"AI attempted {len(tool_calls)} tool call(s) before escalating."
+            if tool_calls
+            else "AI had not yet taken any action before escalating."
+        )
+
+        summary = {
+            "issue": last_user_text or f"Customer request classified as {intent}.",
+            "context": f"Session for user {state['user_id']}, classified intent: {intent}.",
+            "attempted_resolution": attempted,
+            "suggested_next_step": "Review conversation history and verify customer identity before proceeding.",
+        }
 
     return {
         "is_handover_active": True,
