@@ -53,7 +53,7 @@ def generate_reply(
     tool_result: Optional[Dict[str, Any]] = None,
     retrieved_docs: Optional[List[Dict[str, Any]]] = None,
     model: str = PRIMARY_LLM_MODEL,
-    timeout_seconds: float = 15.0,
+    timeout_seconds: float = 30.0,
 ) -> Optional[str]:
     """
     Returns a generated reply string, or None if Ollama couldn't be

@@ -41,6 +41,11 @@ TEST_CASES = [
 
 
 def run_benchmark(rounds: int = 2) -> None:
+    print("Warming up model (not timed — this is the one-time cold-load cost)...")
+    warmup_start = time.time()
+    generate_reply(user_message="Hello", tool_result={"status": "success", "message": "warm-up"})
+    print(f"Warm-up took {time.time() - warmup_start:.2f}s. Starting timed benchmark...\n")
+
     print(f"Benchmarking {len(TEST_CASES)} prompts x {rounds} round(s)...\n")
     all_times = []
 
