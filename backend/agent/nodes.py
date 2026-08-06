@@ -54,6 +54,16 @@ HANDOVER_KEYWORDS = [
     "representative", "human agent", "speak to agent", "operator",
 ]
 
+# Distinct from an interruption ("actually, before that — what's my
+# balance?", which is just a normal topic shift, handled by the push
+# logic below) — these phrases mean "go back to what we were doing",
+# i.e. pop and restore, not push a new topic.
+RESUME_KEYWORDS = [
+    "go back to", "back to my earlier", "back to what i was", "as i was saying",
+    "let's continue with", "lets continue with", "continue with what", "resume my",
+    "what was i asking", "back to my question", "back to my original",
+]
+
 
 def _classify_intent(text: str) -> str:
     lowered = text.lower()
@@ -68,12 +78,21 @@ def _classify_intent(text: str) -> str:
     return "RAG_QUERY"
 
 
+def _is_resume_request(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in RESUME_KEYWORDS)
+
+
 def intent_node(state: AgentState) -> Dict[str, Any]:
     """
     Classifies the latest user message into an active_intent, and applies
-    the Topic Stack Algorithm (PRD §4.1): if the new intent differs from
-    the previous one and the previous one was incomplete, push it onto
-    topic_stack before switching.
+    the Topic Stack Algorithm (PRD §4.1):
+      - if the message asks to resume a prior topic ("go back to my
+        balance question"), pop it off topic_stack and make it active
+        again — re-pushing the just-interrupted intent first, so nested
+        interruptions ("A -> B -> resume A -> resume B") still work.
+      - otherwise, classify fresh; if that's a genuine shift away from an
+        incomplete previous intent, push the previous one before switching.
     """
     if not state["messages"]:
         return {"active_intent": ""}
@@ -81,10 +100,20 @@ def intent_node(state: AgentState) -> Dict[str, Any]:
     latest_message = state["messages"][-1]
     text = getattr(latest_message, "content", str(latest_message))
 
-    new_intent = _classify_intent(text)
     previous_intent = state.get("active_intent", "")
-
     topic_stack = list(state.get("topic_stack", []))
+
+    if topic_stack and _is_resume_request(text):
+        resumed_intent = topic_stack.pop()
+        if (
+            previous_intent
+            and previous_intent not in ("RAG_QUERY", "HANDOVER")
+            and previous_intent != resumed_intent
+        ):
+            topic_stack.append(previous_intent)
+        return {"active_intent": resumed_intent, "topic_stack": topic_stack}
+
+    new_intent = _classify_intent(text)
 
     # Step 1-2 of the Topic Stack Algorithm: push the old intent if we're
     # shifting away from it before it's finished. "Incomplete" here is a
