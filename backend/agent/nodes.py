@@ -23,6 +23,7 @@ import sys
 from typing import Any, Dict
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from backend.agent import guardrails  # noqa: E402
 from backend.agent.state import AgentState  # noqa: E402
 from backend.config import (  # noqa: E402
     CHROMA_COLLECTION_NAME,
@@ -54,6 +55,13 @@ HANDOVER_KEYWORDS = [
     "representative", "human agent", "speak to agent", "operator",
 ]
 
+# Subset of HANDOVER_KEYWORDS that specifically indicates fraud/security,
+# vs. a plain "I want a human" request — used to set handover_reason
+# correctly (was previously re-guessed from raw text in main.py after
+# the fact; now the node that actually classifies HANDOVER sets it
+# directly, single source of truth).
+FRAUD_KEYWORDS = ["unauthorized", "stolen", "fraud", "hacked"]
+
 # Distinct from an interruption ("actually, before that — what's my
 # balance?", which is just a normal topic shift, handled by the push
 # logic below) — these phrases mean "go back to what we were doing",
@@ -63,6 +71,43 @@ RESUME_KEYWORDS = [
     "let's continue with", "lets continue with", "continue with what", "resume my",
     "what was i asking", "back to my question", "back to my original",
 ]
+
+
+def guardrail_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Runs before intent classification. Blocks clearly out-of-scope or
+    prompt-injection messages rather than letting them fall through to
+    RAG_QUERY (where they'd just retrieve nothing useful and waste a
+    turn) or, worse, an LLM call that might partially comply with an
+    injected instruction.
+
+    Repeated blocked turns escalate to a human via handover_reason=
+    "out_of_scope" — the same escalation shape as low-confidence
+    repetition (§4.3's out_of_scope trigger), using the same
+    UNCLEAR_ATTEMPTS_HANDOVER_LIMIT so there's one consistent "how many
+    strikes" policy across the whole system, not a separate tunable per
+    guardrail.
+    """
+    if not state["messages"]:
+        return {"guardrail_blocked": False}
+
+    latest_message = state["messages"][-1]
+    text = getattr(latest_message, "content", str(latest_message))
+
+    blocked, reason = guardrails.check(text)
+    attempts = state.get("out_of_scope_attempts", 0) + 1 if blocked else 0
+
+    result: Dict[str, Any] = {"guardrail_blocked": blocked, "out_of_scope_attempts": attempts}
+
+    if blocked:
+        result["guardrail_reason"] = reason
+        if attempts >= UNCLEAR_ATTEMPTS_HANDOVER_LIMIT:
+            result["active_intent"] = "HANDOVER"
+            result["handover_reason"] = "out_of_scope"
+        else:
+            result["active_intent"] = "OUT_OF_SCOPE"
+
+    return result
 
 
 def _classify_intent(text: str) -> str:
@@ -114,6 +159,11 @@ def intent_node(state: AgentState) -> Dict[str, Any]:
         return {"active_intent": resumed_intent, "topic_stack": topic_stack}
 
     new_intent = _classify_intent(text)
+    result_extra: Dict[str, Any] = {}
+    if new_intent == "HANDOVER":
+        result_extra["handover_reason"] = (
+            "fraud_flag" if any(kw in text.lower() for kw in FRAUD_KEYWORDS) else "explicit_request"
+        )
 
     # Step 1-2 of the Topic Stack Algorithm: push the old intent if we're
     # shifting away from it before it's finished. "Incomplete" here is a
@@ -138,6 +188,7 @@ def intent_node(state: AgentState) -> Dict[str, Any]:
     return {
         "active_intent": new_intent,
         "topic_stack": topic_stack,
+        **result_extra,
     }
 
 
@@ -296,6 +347,7 @@ def confidence_node(state: AgentState) -> Dict[str, Any]:
         },
         "decision": decision,
         "unclear_attempts": unclear_attempts,
+        **({"handover_reason": "low_confidence_repeated"} if decision == "handover" else {}),
     }
 
 

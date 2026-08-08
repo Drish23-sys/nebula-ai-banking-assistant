@@ -4,20 +4,30 @@ backend/agent/graph.py
 Compiles the AgentState nodes (backend/agent/nodes.py) into a runnable
 LangGraph StateGraph with MemorySaver checkpointing (PRD §3.1, Day 2).
 
-Shape (Day 3 — real confidence thresholds now wired):
+Shape (Day 6 — guardrails added as the new entry point):
 
-    START -> intent_node -> [route on active_intent]
-                                |-> TOOL_CALL -> tool_node -> confidence_node -> [route on decision]
-                                |-> RAG_QUERY -> rag_node  -> confidence_node -> [route on decision]
-                                |                                                   |-> auto_respond/clarify -> END
-                                |                                                   |-> handover -> handover_node -> END
-                                |-> HANDOVER  -> handover_node -> END
+    START -> guardrail_node -> [route on guardrail_blocked]
+                                  |-> clean          -> intent_node -> [route on active_intent]
+                                  |                                       |-> TOOL_CALL -> tool_node -> confidence_node -> [route on decision]
+                                  |                                       |-> RAG_QUERY -> rag_node  -> confidence_node -> [route on decision]
+                                  |                                       |                                                   |-> auto_respond/clarify -> END
+                                  |                                       |                                                   |-> handover -> handover_node -> END
+                                  |                                       |-> HANDOVER  -> handover_node -> END
+                                  |-> blocked (1st time)  -> END directly (active_intent="OUT_OF_SCOPE", a polite decline — see main.py's _draft_reply)
+                                  |-> blocked (repeated)  -> handover_node -> END (handover_reason="out_of_scope")
 
+guardrail_node (backend/agent/guardrails.py) blocks clearly out-of-scope
+or prompt-injection messages before they reach intent classification.
 confidence_node computes C = 0.4*S_retrieval + 0.4*S_grounding +
 0.2*S_intent and a decision label using config.py's 0.65/0.50
 thresholds, plus the "2 consecutive low-confidence turns" escalation
 rule (§4.3). route_after_confidence sends low-confidence turns to
 handover_node instead of ending the graph directly.
+
+Every node that decides to escalate (intent_node's HANDOVER keyword
+match, confidence_node's low-confidence repetition, guardrail_node's
+repeated blocks) sets `handover_reason` itself — main.py reads it
+directly rather than re-deriving why a handover happened from raw text.
 
 MemorySaver gives each session_id its own persisted thread of state
 across turns (in-process only — swapped for a durable checkpointer
@@ -34,6 +44,7 @@ from langgraph.graph import END, StateGraph
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from backend.agent.nodes import (  # noqa: E402
     confidence_node,
+    guardrail_node,
     handover_node,
     intent_node,
     rag_node,
@@ -48,6 +59,21 @@ TOOL_INTENTS = {
     "CHECK_TRANSFER_LIMIT",
     "CALCULATE_LOAN_EMI",
 }
+
+
+def route_after_guardrail(state: AgentState) -> Literal["intent_node", "handover_node", "__end__"]:
+    """
+    Edge-routing function: guardrail_node sets active_intent directly
+    when it blocks a turn (see nodes.py) — "OUT_OF_SCOPE" for a first
+    offense (declined here, graph ends) or "HANDOVER" once
+    out_of_scope_attempts hits the limit (escalates like any other
+    handover). A clean turn just proceeds to intent_node as normal.
+    """
+    if not state.get("guardrail_blocked"):
+        return "intent_node"
+    if state.get("active_intent") == "HANDOVER":
+        return "handover_node"
+    return END
 
 
 def route_after_intent(state: AgentState) -> Literal["tool_node", "rag_node", "handover_node"]:
@@ -79,13 +105,20 @@ def route_after_confidence(state: AgentState) -> Literal["handover_node", "__end
 def build_graph():
     graph = StateGraph(AgentState)
 
+    graph.add_node("guardrail_node", guardrail_node)
     graph.add_node("intent_node", intent_node)
     graph.add_node("tool_node", tool_node)
     graph.add_node("rag_node", rag_node)
     graph.add_node("confidence_node", confidence_node)
     graph.add_node("handover_node", handover_node)
 
-    graph.set_entry_point("intent_node")
+    graph.set_entry_point("guardrail_node")
+
+    graph.add_conditional_edges(
+        "guardrail_node",
+        route_after_guardrail,
+        {"intent_node": "intent_node", "handover_node": "handover_node", END: END},
+    )
 
     graph.add_conditional_edges(
         "intent_node",
@@ -133,9 +166,19 @@ if __name__ == "__main__":
     ]
 
     state = new_state(session_id=session_id, user_id="USR-4401")
+    first_turn = True
 
     for turn_text in turns:
-        state["messages"] = state.get("messages", []) + [HumanMessage(content=turn_text)]
+        if first_turn:
+            state["messages"] = [HumanMessage(content=turn_text)]
+            first_turn = False
+        else:
+            # Only the new message — add_messages (state.py) + the
+            # checkpoint supply everything else. Matches main.py's
+            # /chat handler exactly; see its comments for why passing a
+            # full rebuilt list here would double-accumulate.
+            state = {"messages": [HumanMessage(content=turn_text)]}
+
         result = compiled_graph.invoke(state, config=config)
         state = result
 

@@ -80,23 +80,6 @@ class AgentReplyRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _infer_trigger_reason(active_intent: str, last_user_text: str) -> str:
-    """
-    Maps a handover-triggering turn to one of the 4 reasons from
-    docs/FRONTEND_HANDOFF.md's `trigger_reason` enum. Heuristic today
-    (matches nodes.py's HANDOVER_KEYWORDS); TODO(later): have
-    handover_node itself classify this from the actual escalation path
-    instead of re-deriving it here from raw text.
-    """
-    lowered = last_user_text.lower()
-    fraud_words = ("fraud", "unauthorized", "stolen", "hacked")
-    if active_intent == "HANDOVER" and any(w in lowered for w in fraud_words):
-        return "fraud_flag"
-    if active_intent == "HANDOVER":
-        return "explicit_request"
-    return "low_confidence_repeated"
-
-
 def _draft_reply(result: Dict[str, Any], user_message: str) -> str:
     """
     Tries a real Ollama-generated reply first, grounded in this turn's
@@ -106,6 +89,10 @@ def _draft_reply(result: Dict[str, Any], user_message: str) -> str:
     this function always returns *something* sensible either way.
     """
     intent = result.get("active_intent", "")
+
+    if intent == "OUT_OF_SCOPE":
+        return ("I'm the Nebula banking assistant, so I can only help with account, card, "
+                "transfer, and banking policy questions. What can I help you with on that front?")
 
     if intent == "HANDOVER":
         return "I'm connecting you with a human support specialist who can help with this right away."
@@ -182,17 +169,35 @@ def chat(req: ChatRequest) -> ChatResponse:
             handover_triggered=False,
         )
 
-    graph_state = new_state(session_id=req.session_id, user_id=req.user_id)
-    graph_state["messages"] = [HumanMessage(content=req.message)]
-
     config = {"configurable": {"thread_id": req.session_id}}
+
+    # CRITICAL: only build a brand-new AgentState on this thread's first
+    # turn. On every later turn, pass just the new message and let
+    # MemorySaver's checkpoint supply everything else (topic_stack,
+    # out_of_scope_attempts, unclear_attempts, active_intent, ...).
+    #
+    # Bug history: this used to call new_state(...) on every single
+    # request, which — since AgentState is a plain TypedDict with no
+    # custom reducers except `messages` — overwrote every channel back
+    # to its default each turn. Topic-stack resume and out-of-scope
+    # escalation counting were both silently broken as a result (each
+    # appeared to "work" in early manual tests purely by accident, e.g.
+    # a resume phrase that happened to also contain a keyword like
+    # "balance"). Caught by a deliberately keyword-free resume-phrase
+    # test — see the graph.py smoke test's sibling check in scripts/.
+    if not compiled_graph.get_state(config).values:
+        graph_state = new_state(session_id=req.session_id, user_id=req.user_id)
+        graph_state["messages"] = [HumanMessage(content=req.message)]
+    else:
+        graph_state = {"messages": [HumanMessage(content=req.message)]}
+
     result = compiled_graph.invoke(graph_state, config=config)
 
     reply_text = _draft_reply(result, req.message)
     handover_triggered = bool(result.get("is_handover_active"))
 
     if handover_triggered:
-        trigger_reason = _infer_trigger_reason(result.get("active_intent", ""), req.message)
+        trigger_reason = result.get("handover_reason") or "explicit_request"
         session_store.create_ticket(
             req.session_id, trigger_reason, result.get("handover_summary") or {}
         )
