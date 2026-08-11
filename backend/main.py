@@ -231,7 +231,13 @@ def chat_status(session_id: str, since: Optional[str] = None) -> Dict[str, Any]:
     return {
         "conversation_mode": mode,
         "new_messages": [
-            {"role": m["role"], "text": m["text"], "timestamp": m["timestamp"]} for m in new_messages
+            {
+                "message_id": m["message_id"],
+                "role": m["role"],
+                "text": m["text"],
+                "timestamp": m["timestamp"],
+            }
+            for m in new_messages
         ],
     }
 
