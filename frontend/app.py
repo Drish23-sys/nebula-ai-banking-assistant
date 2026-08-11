@@ -160,9 +160,7 @@ with tab1:
     # Render history
     for msg in st.session_state.chat_history:
         with st.chat_message("user" if msg["role"] == "user" else "assistant"):
-            if msg.get("is_agent"):
-                st.caption("Live agent")
-            st.write(msg["text"])
+            st.write(msg["text"].replace("$", "\\$"))
 
             confidence = msg.get("confidence")
             if confidence:
