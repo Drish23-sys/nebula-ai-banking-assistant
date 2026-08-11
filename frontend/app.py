@@ -10,15 +10,21 @@ backend on Day 5 integration checkpoint. Nothing else in this file should
 need to change if the mock server matches the contract exactly.
 """
 
-import streamlit as st
-import requests
+import os
 import uuid
+
+import requests
+import streamlit as st
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-BASE_URL = "http://localhost:8001"  # mock server. Swap to http://localhost:8000 on Day 5.
+# Reads from env var if set (e.g. for a deployed backend URL later), else
+# defaults to the real local backend on 8000. To point at the mock server
+# instead, run: $env:BACKEND_URL = "http://localhost:8001" (PowerShell)
+# before `streamlit run app.py`.
+BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 DECISION_COLORS = {
     "auto_respond": "🟢",
@@ -40,6 +46,16 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []  # list of dicts: {role, text, confidence?, citations?, quick_actions?}
 if "conversation_mode" not in st.session_state:
     st.session_state.conversation_mode = "ai"
+if "seen_message_ids" not in st.session_state:
+    # Tracks message_ids already rendered via polling, so a 3s-interval
+    # autorefresh doesn't re-append the same agent messages forever.
+    # Without this, /chat/{id}/status with no `since` returns the FULL
+    # session history every poll (by design — it's a simple "give me
+    # everything since X" endpoint), which would otherwise duplicate
+    # every message in the chat on every single refresh cycle.
+    st.session_state.seen_message_ids = set()
+if "last_poll_ts" not in st.session_state:
+    st.session_state.last_poll_ts = None
 
 tab1, tab2 = st.tabs(["💬 Chat", "🎧 Agent Queue"])
 
@@ -58,7 +74,7 @@ def send_message(message: str):
                 "user_id": st.session_state.user_id,
                 "message": message,
             },
-            timeout=10,
+            timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -83,16 +99,41 @@ def send_message(message: str):
 
 
 def poll_status():
-    """GET /chat/{session_id}/status — called while conversation_mode == 'human'."""
+    """
+    GET /chat/{session_id}/status — called while conversation_mode == 'human'.
+
+    Passes `since` (the last message timestamp we've already seen) so the
+    backend only returns genuinely new messages, and additionally dedupes
+    by message_id as a safety net — the two together mean this is safe to
+    call every 3s indefinitely without ever re-appending a message twice.
+
+    Also filters to role == "agent" only: the user's own message and the
+    AI's pre-handover reply are already in chat_history (added locally by
+    send_message() when they were sent) — the status endpoint's job here
+    is just to surface what the *live agent* said since then.
+    """
     try:
-        resp = requests.get(f"{BASE_URL}/chat/{st.session_state.session_id}/status", timeout=10)
+        params = {"since": st.session_state.last_poll_ts} if st.session_state.last_poll_ts else {}
+        resp = requests.get(
+            f"{BASE_URL}/chat/{st.session_state.session_id}/status", params=params, timeout=10
+        )
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException:
         return
 
     st.session_state.conversation_mode = data.get("conversation_mode", "ai")
+
     for msg in data.get("new_messages", []):
+        msg_id = msg.get("message_id")
+        if msg_id in st.session_state.seen_message_ids:
+            continue
+        st.session_state.seen_message_ids.add(msg_id)
+        st.session_state.last_poll_ts = msg.get("timestamp", st.session_state.last_poll_ts)
+
+        if msg.get("role") != "agent":
+            continue  # user/assistant messages here are echoes of what we already showed locally
+
         st.session_state.chat_history.append({
             "role": "assistant",  # agent replies render the same as assistant bubbles
             "text": msg["text"],
@@ -167,6 +208,8 @@ with tab1:
             st.session_state.session_id = f"sess_{uuid.uuid4().hex[:8]}"
             st.session_state.chat_history = []
             st.session_state.conversation_mode = "ai"
+            st.session_state.seen_message_ids = set()
+            st.session_state.last_poll_ts = None
             st.rerun()
 
 # ---------------------------------------------------------------------------
