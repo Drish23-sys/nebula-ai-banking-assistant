@@ -22,6 +22,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
@@ -33,6 +34,27 @@ from backend.config import API_HOST, API_PORT  # noqa: E402
 from backend.llm_client import generate_reply  # noqa: E402
 
 app = FastAPI(title="Nebula AI Banking Assistant")
+
+# Both React apps (customer chat + agent console) run as separate browser
+# origins and call this backend via fetch(), which — unlike Streamlit's
+# server-side `requests` calls — IS subject to the browser's CORS policy.
+# Without this, every request from either app fails with a generic
+# "Failed to fetch" (the browser blocks it before any response comes
+# back, so it never even shows up as a 4xx/5xx — just a network failure).
+#
+# ALLOWED_ORIGINS reads from an env var so production origins (your real
+# Vercel domains) can be added at deploy time with no code changes. Local
+# dev ports for both Vite apps are included by default.
+_default_origins = "http://localhost:5173,http://localhost:5174"
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", _default_origins).split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")

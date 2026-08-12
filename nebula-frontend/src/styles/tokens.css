@@ -1,0 +1,48 @@
+:root {
+  /* Color — "signal" system. Blue is the operating register; amber/coral
+     are reserved exclusively for the confidence/decision system so they
+     stay meaningful, never decorative. */
+  --bg: #0b1120;
+  --bg-elevated: #111a2e;
+  --bg-elevated-2: #16213a;
+  --border: rgba(232, 238, 252, 0.08);
+  --border-strong: rgba(232, 238, 252, 0.16);
+
+  --signal-blue: #2f6fed;
+  --signal-blue-soft: rgba(47, 111, 237, 0.14);
+  --signal-blue-glow: rgba(47, 111, 237, 0.35);
+  --cyan-pulse: #22d3ee;
+  --cyan-pulse-soft: rgba(34, 211, 238, 0.14);
+
+  --amber: #f5a623;
+  --amber-soft: rgba(245, 166, 35, 0.14);
+  --coral: #ff5c72;
+  --coral-soft: rgba(255, 92, 114, 0.14);
+  --mint: #34d399;
+  --mint-soft: rgba(52, 211, 153, 0.14);
+
+  --text: #e8eefc;
+  --text-muted: #8c9bc4;
+  --text-faint: #56628a;
+
+  /* Type */
+  --font-display: "Space Grotesk", "Inter", sans-serif;
+  --font-body: "Inter", -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", monospace;
+
+  /* Layout */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --sidebar-w: 280px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

@@ -1,0 +1,68 @@
+@import "./tokens.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(1100px 600px at 15% -10%, rgba(47, 111, 237, 0.16), transparent 60%),
+    radial-gradient(900px 500px at 110% 10%, rgba(34, 211, 238, 0.08), transparent 55%),
+    var(--bg);
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Faint dot grid, evokes a trading-terminal / instrument-panel feel
+   without competing with content. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(232, 238, 252, 0.045) 1px, transparent 1px);
+  background-size: 28px 28px;
+  z-index: 0;
+}
+
+button {
+  font-family: inherit;
+}
+
+::selection {
+  background: var(--signal-blue-glow);
+  color: var(--text);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--cyan-pulse);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
