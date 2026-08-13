@@ -35,18 +35,12 @@ from backend.llm_client import generate_reply  # noqa: E402
 
 app = FastAPI(title="Nebula AI Banking Assistant")
 
-# Both React apps (customer chat + agent console) run as separate browser
-# origins and call this backend via fetch(), which — unlike Streamlit's
-# server-side `requests` calls — IS subject to the browser's CORS policy.
-# Without this, every request from either app fails with a generic
-# "Failed to fetch" (the browser blocks it before any response comes
-# back, so it never even shows up as a 4xx/5xx — just a network failure).
-#
-# ALLOWED_ORIGINS reads from an env var so production origins (your real
-# Vercel domains) can be added at deploy time with no code changes. Local
-# dev ports for both Vite apps are included by default.
-_default_origins = "http://localhost:5173,http://localhost:5174"
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", _default_origins).split(",")
+# CORS: the customer-chat React app and the agent-dashboard React app run
+# as separate origins (different dev ports locally, different Vercel
+# domains in prod), and the browser blocks cross-origin fetches unless
+# the server explicitly allows them. ALLOWED_ORIGINS is env-driven so
+# prod domains can be added without touching code — see backend/config.py.
+from backend.config import ALLOWED_ORIGINS  # noqa: E402
 
 app.add_middleware(
     CORSMiddleware,
@@ -218,6 +212,19 @@ def chat(req: ChatRequest) -> ChatResponse:
     reply_text = _draft_reply(result, req.message)
     handover_triggered = bool(result.get("is_handover_active"))
 
+    # Bug fix: handover can trigger two ways — an explicit HANDOVER intent
+    # (keyword like "fraud"), which _draft_reply already handles, OR a
+    # low-confidence RAG_QUERY turn (weak retrieval similarity on an
+    # off-topic/unmatched question) that _draft_reply has no special case
+    # for. In that second case it was generating a normal, coherent-
+    # sounding Ollama answer while the session silently flipped to human
+    # mode underneath it — customer sees "You're welcome!" one second and
+    # "connected to a live agent" the next, with no acknowledgment either
+    # message was a handoff. Always show the handoff message when
+    # handover actually triggered, regardless of which path caused it.
+    if handover_triggered and result.get("active_intent") != "HANDOVER":
+        reply_text = "I'm not fully confident in my answer here — connecting you with a human support specialist who can help."
+
     if handover_triggered:
         trigger_reason = result.get("handover_reason") or "explicit_request"
         session_store.create_ticket(
@@ -253,12 +260,7 @@ def chat_status(session_id: str, since: Optional[str] = None) -> Dict[str, Any]:
     return {
         "conversation_mode": mode,
         "new_messages": [
-            {
-                "message_id": m["message_id"],
-                "role": m["role"],
-                "text": m["text"],
-                "timestamp": m["timestamp"],
-            }
+            {"message_id": m["message_id"], "role": m["role"], "text": m["text"], "timestamp": m["timestamp"]}
             for m in new_messages
         ],
     }
