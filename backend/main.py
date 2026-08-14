@@ -55,18 +55,23 @@ app.add_middleware(
 def _startup() -> None:
     session_store.init_schema()
 
-    # Warm-up call: Ollama loads the model into memory/VRAM on its first
-    # request (~15-18s observed), then stays fast (~3.5-4.5s) for
-    # subsequent calls as long as it stays loaded. Paying that cost here,
-    # once, at server startup means the first real user never eats it.
-    print("[startup] Warming up Ollama model...")
+    # Ollama loads the model into memory/VRAM on its first request
+    # (~15-18s observed), then stays fast (~3.5-4.5s) for subsequent
+    # calls as long as it stays loaded — paying that cost here, once, at
+    # startup means the first real user never eats it. When
+    # LLM_PROVIDER=groq (deployment), there's no local model to warm —
+    # this becomes a plain connectivity check instead, and stays fast.
+    from backend.config import LLM_PROVIDER
+    label = "Ollama model" if LLM_PROVIDER == "ollama" else "Groq connectivity"
+    print(f"[startup] Warming up {label}...")
     start = time.time()
     result = generate_reply(user_message="Hello", tool_result={"status": "success", "message": "warm-up"})
     elapsed = time.time() - start
     if result:
-        print(f"[startup] Model warm and ready ({elapsed:.1f}s).")
+        print(f"[startup] {label} ready ({elapsed:.1f}s).")
     else:
-        print(f"[startup] Warm-up call failed after {elapsed:.1f}s — Ollama may not be running. "
+        hint = "Ollama may not be running" if LLM_PROVIDER == "ollama" else "check GROQ_API_KEY"
+        print(f"[startup] Warm-up call failed after {elapsed:.1f}s — {hint}. "
               f"/chat will fall back to template replies until it's available.")
 
 
