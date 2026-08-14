@@ -55,6 +55,22 @@ HANDOVER_KEYWORDS = [
     "representative", "human agent", "speak to agent", "operator",
 ]
 
+# Plain conversational turns — greetings, thanks, acknowledgments — that
+# carry no banking request at all. Checked before the TOOL/RAG fallback
+# so these never trigger a ChromaDB retrieval: a short greeting almost
+# never scores well against banking-policy chunks (nothing in the KB is
+# *about* "hi"), which was previously sending every "hi" straight to
+# handover on the first turn via the low-confidence path. Deliberately
+# kept to short, unambiguous phrases — anything longer or more specific
+# should still fall through to RAG_QUERY rather than being swallowed here.
+SMALL_TALK_KEYWORDS = [
+    "hi", "hii", "hiii", "hello", "hey", "yo", "hola",
+    "good morning", "good afternoon", "good evening",
+    "thanks", "thank you", "thanks a lot", "thank u", "thnq", "tysm",
+    "ok", "okay", "cool", "great", "nice", "got it", "sounds good",
+    "bye", "goodbye", "see you", "cya",
+]
+
 # Subset of HANDOVER_KEYWORDS that specifically indicates fraud/security,
 # vs. a plain "I want a human" request — used to set handover_reason
 # correctly (was previously re-guessed from raw text in main.py after
@@ -111,7 +127,7 @@ def guardrail_node(state: AgentState) -> Dict[str, Any]:
 
 
 def _classify_intent(text: str) -> str:
-    lowered = text.lower()
+    lowered = text.lower().strip().rstrip("!.?")
 
     if any(kw in lowered for kw in HANDOVER_KEYWORDS):
         return "HANDOVER"
@@ -119,6 +135,18 @@ def _classify_intent(text: str) -> str:
     for intent_name, keywords in TOOL_INTENT_KEYWORDS.items():
         if any(kw in lowered for kw in keywords):
             return intent_name
+
+    # Only short messages qualify — "hi, what's my transfer limit" should
+    # still reach RAG_QUERY/TOOL matching above (and it already did, since
+    # those checks run first), but this guards against a longer message
+    # that merely *contains* "hi" or "ok" as a substring of another word
+    # or phrase from being misclassified as small talk.
+    word_count = len(lowered.split())
+    if word_count <= 4 and any(
+        lowered == kw or lowered.startswith(kw + " ") or lowered.startswith(kw + ",")
+        for kw in SMALL_TALK_KEYWORDS
+    ):
+        return "SMALL_TALK"
 
     return "RAG_QUERY"
 
@@ -292,6 +320,8 @@ def confidence_node(state: AgentState) -> Dict[str, Any]:
     # --- S_intent ---
     if intent == "HANDOVER":
         s_intent = INTENT_CONFIDENCE_HANDOVER
+    elif intent == "SMALL_TALK":
+        s_intent = INTENT_CONFIDENCE_MATCHED_TOOL  # unambiguous, same tier as a matched tool keyword
     elif intent and intent != "RAG_QUERY":
         s_intent = INTENT_CONFIDENCE_MATCHED_TOOL
     elif intent == "RAG_QUERY":

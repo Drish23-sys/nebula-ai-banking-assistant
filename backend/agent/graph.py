@@ -76,11 +76,17 @@ def route_after_guardrail(state: AgentState) -> Literal["intent_node", "handover
     return END
 
 
-def route_after_intent(state: AgentState) -> Literal["tool_node", "rag_node", "handover_node"]:
+def route_after_intent(state: AgentState) -> Literal["tool_node", "rag_node", "confidence_node", "handover_node"]:
     """Edge-routing function: picks the next node based on active_intent."""
     intent = state.get("active_intent", "")
     if intent == "HANDOVER":
         return "handover_node"
+    if intent == "SMALL_TALK":
+        # No tool call, no document needed — greetings/thanks skip
+        # straight to confidence_node (which scores SMALL_TALK as fully
+        # confident with no retrieval performed) rather than falling
+        # through to rag_node like every other unmatched intent used to.
+        return "confidence_node"
     if intent in TOOL_INTENTS:
         return "tool_node"
     return "rag_node"
@@ -126,6 +132,7 @@ def build_graph():
         {
             "tool_node": "tool_node",
             "rag_node": "rag_node",
+            "confidence_node": "confidence_node",
             "handover_node": "handover_node",
         },
     )

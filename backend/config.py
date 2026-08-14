@@ -78,3 +78,19 @@ UNCLEAR_ATTEMPTS_HANDOVER_LIMIT = 2  # §4.3 trigger 2: low confidence twice con
 # ---------------------------------------------------------------------------
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
+
+# ---------------------------------------------------------------------------
+# CORS — origins allowed to call this API from a browser.
+# ---------------------------------------------------------------------------
+# Comma-separated list via env var, e.g. in Render's dashboard:
+#   ALLOWED_ORIGINS=https://nebula-customer.vercel.app,https://nebula-agent.vercel.app
+# Defaults cover the two local Vite dev servers (customer app on 5173,
+# agent dashboard on 5174) so CORS never blocks local development out of
+# the box.
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174"
+    ).split(",")
+    if o.strip()
+]
