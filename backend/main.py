@@ -110,6 +110,21 @@ def _draft_reply(result: Dict[str, Any], user_message: str) -> str:
         return ("I'm the Nebula banking assistant, so I can only help with account, card, "
                 "transfer, and banking policy questions. What can I help you with on that front?")
 
+    if intent == "SMALL_TALK":
+        # Skips the LLM entirely rather than routing through generate_reply()
+        # — that call's system prompt is deliberately strict about only
+        # answering from provided context (to prevent hallucinated banking
+        # details), and a greeting/thanks has no context by design. Asking
+        # it to improvise a reply anyway risks a confused "I don't have
+        # information about that" response to a plain "hi".
+        lowered = user_message.lower()
+        if any(kw in lowered for kw in ("thank", "thnq", "tysm")):
+            return "You're welcome! Let me know if there's anything else I can help with."
+        if any(kw in lowered for kw in ("bye", "goodbye", "cya", "see you")):
+            return "Take care! Reach out anytime you need help with your account."
+        return ("Hi there! I'm Nebula, your banking assistant. I can help with your "
+                "balance, cards, transfers, or account policies — what can I do for you?")
+
     if intent == "HANDOVER":
         return "I'm connecting you with a human support specialist who can help with this right away."
 
