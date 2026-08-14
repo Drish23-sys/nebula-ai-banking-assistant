@@ -24,7 +24,13 @@ import sys
 from typing import Any, Dict, List, Optional
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from backend.config import OLLAMA_HOST, PRIMARY_LLM_MODEL  # noqa: E402
+from backend.config import (  # noqa: E402
+    OLLAMA_HOST,
+    PRIMARY_LLM_MODEL,
+    LLM_PROVIDER,
+    GROQ_API_KEY,
+    GROQ_FALLBACK_MODEL,
+)
 
 SYSTEM_PROMPT = """You are Nebula, a banking assistant. Answer the customer's \
 message using ONLY the CONTEXT provided below — never invent account details, \
@@ -52,25 +58,37 @@ def generate_reply(
     user_message: str,
     tool_result: Optional[Dict[str, Any]] = None,
     retrieved_docs: Optional[List[Dict[str, Any]]] = None,
-    model: str = PRIMARY_LLM_MODEL,
+    model: Optional[str] = None,
     timeout_seconds: float = 30.0,
 ) -> Optional[str]:
     """
-    Returns a generated reply string, or None if Ollama couldn't be
+    Returns a generated reply string, or None if the LLM couldn't be
     reached / errored — callers must handle the None case with a
     fallback, never assume this always succeeds.
+
+    Routes to Ollama or Groq based on config.LLM_PROVIDER — see that
+    var's comment in config.py. Same system prompt and context-block
+    logic either way, so reply quality/grounding behavior is consistent
+    regardless of which provider is active.
     """
+    context_block = _build_context_block(tool_result, retrieved_docs)
+    user_prompt = f"CONTEXT:\n{context_block}\n\nCUSTOMER MESSAGE:\n{user_message}"
+
+    if LLM_PROVIDER == "groq":
+        return _generate_reply_groq(user_prompt, model or GROQ_FALLBACK_MODEL, timeout_seconds)
+    return _generate_reply_ollama(user_prompt, model or PRIMARY_LLM_MODEL, timeout_seconds)
+
+
+def _generate_reply_ollama(user_prompt: str, model: str, timeout_seconds: float) -> Optional[str]:
     try:
         import ollama
 
         client = ollama.Client(host=OLLAMA_HOST, timeout=timeout_seconds)
-        context_block = _build_context_block(tool_result, retrieved_docs)
-
         response = client.chat(
             model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"CONTEXT:\n{context_block}\n\nCUSTOMER MESSAGE:\n{user_message}"},
+                {"role": "user", "content": user_prompt},
             ],
             options={"temperature": 0.3},
         )
@@ -81,6 +99,35 @@ def generate_reply(
         # Covers: Ollama not running, model not pulled, connection refused,
         # timeout, malformed response — all fail soft to None on purpose.
         print(f"[llm_client] Ollama generation failed, falling back to template: {exc}")
+        return None
+
+
+def _generate_reply_groq(user_prompt: str, model: str, timeout_seconds: float) -> Optional[str]:
+    if not GROQ_API_KEY:
+        print("[llm_client] LLM_PROVIDER=groq but no GROQ_API_KEY set — falling back to template.")
+        return None
+
+    try:
+        from groq import Groq
+
+        client = Groq(api_key=GROQ_API_KEY, timeout=timeout_seconds)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        return text or None
+
+    except Exception as exc:
+        # Same fail-soft contract as the Ollama path and as
+        # groq_client.py's handover-summary calls — missing/invalid key,
+        # network error, rate limit, malformed response all fall back
+        # to the deterministic template rather than raising.
+        print(f"[llm_client] Groq generation failed, falling back to template: {exc}")
         return None
 
 

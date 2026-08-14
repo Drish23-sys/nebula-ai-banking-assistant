@@ -30,9 +30,21 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 PRIMARY_LLM_MODEL = os.getenv("PRIMARY_LLM_MODEL", "qwen2.5:3b-instruct-q4_K_M")
 STRETCH_LLM_MODEL = os.getenv("STRETCH_LLM_MODEL", "qwen2.5:7b-instruct-q4_K_M")
 
+# Which backend generate_reply() (llm_client.py) actually calls for live
+# chat replies. "ollama" (default) — local dev, needs `ollama serve`
+# running. "groq" — used in deployment (Render), since Render doesn't
+# run a GPU-backed Ollama server well: no persistent GPU on standard web
+# services, and pulling a multi-GB model on every cold start is a bad
+# fit. Set LLM_PROVIDER=groq in Render's environment variables; leave
+# unset (defaults to ollama) for local development.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
+
 # ---------------------------------------------------------------------------
-# Groq Cloud — reasoning / handover-summary tier only (§4.3), never on the
-# live conversational hot path.
+# Groq Cloud — handover-summary generation (§4.3) always. Also doubles as
+# the live chat reply provider (llm_client.py) when LLM_PROVIDER=groq —
+# see the LLM_PROVIDER comment above. GROQ_FALLBACK_MODEL is reused as
+# that primary chat model in deployment: it's the same Qwen family
+# already used locally via Ollama, just hosted instead of local.
 # ---------------------------------------------------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_HANDOVER_MODEL = os.getenv("GROQ_HANDOVER_MODEL", "llama-3.3-70b-versatile")
@@ -85,8 +97,8 @@ API_PORT = int(os.getenv("API_PORT", "8000"))
 # Comma-separated list via env var, e.g. in Render's dashboard:
 #   ALLOWED_ORIGINS=https://nebula-customer.vercel.app,https://nebula-agent.vercel.app
 # Defaults cover the two local Vite dev servers (customer app on 5173,
-# agent dashboard on 5174) so CORS never blocks local development out of
-# the box.
+# agent dashboard on 5174 — see each app's vite.config.ts) so CORS never
+# blocks local development out of the box.
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv(
