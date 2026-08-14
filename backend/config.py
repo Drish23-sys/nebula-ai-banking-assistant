@@ -48,7 +48,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 # ---------------------------------------------------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_HANDOVER_MODEL = os.getenv("GROQ_HANDOVER_MODEL", "llama-3.3-70b-versatile")
-GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "qwen-2.5-72b")
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-120b")
 
 # ---------------------------------------------------------------------------
 # Embeddings + Vector DB (§2.4) — CPU-bound regardless of GPU vendor.
