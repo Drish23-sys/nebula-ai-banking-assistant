@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
 from backend import session_store  # noqa: E402
-from backend.agent.graph import compiled_graph  # noqa: E402
+from backend.agent.graph import compiled_graph, TOOL_INTENTS  # noqa: E402
 from backend.agent.state import new_state  # noqa: E402
 from backend.config import API_HOST, API_PORT  # noqa: E402
 from backend.llm_client import generate_reply  # noqa: E402
@@ -134,7 +134,14 @@ def _draft_reply(result: Dict[str, Any], user_message: str) -> str:
         return "I'm connecting you with a human support specialist who can help with this right away."
 
     tool_calls = result.get("tool_calls", [])
-    last_tool_result = tool_calls[-1]["result"] if tool_calls else None
+    # Bug fix: tool_calls is an intentionally-accumulating history (used
+    # later for the handover summary's "attempted N tool calls" count),
+    # never cleared between turns — so tool_calls[-1] is only genuinely
+    # *this turn's* result when a tool actually ran this turn. Without
+    # this guard, a RAG_QUERY or SMALL_TALK turn several messages after
+    # a tool call would silently reuse that old result (or worse, an old
+    # *error*) as if it were the answer to the current, unrelated question.
+    last_tool_result = tool_calls[-1]["result"] if (tool_calls and intent in TOOL_INTENTS) else None
     retrieved_docs = result.get("retrieved_docs", [])
 
     # A failed tool call (e.g. Pydantic validation error, no account
@@ -145,7 +152,13 @@ def _draft_reply(result: Dict[str, Any], user_message: str) -> str:
         return last_tool_result.get("message", "I ran into an issue completing that — let me connect you with support.")
 
     generated = generate_reply(
-        user_message=user_message, tool_result=last_tool_result, retrieved_docs=retrieved_docs
+        user_message=user_message,
+        tool_result=last_tool_result,
+        retrieved_docs=retrieved_docs,
+        # Exclude the last entry — that's the current turn's own message,
+        # already included as user_message above; everything before it is
+        # genuine prior-turn history.
+        conversation_history=(result.get("messages") or [])[:-1],
     )
     if generated:
         return generated
@@ -318,9 +331,33 @@ def agent_reply(ticket_id: str, req: AgentReplyRequest) -> Dict[str, str]:
 @app.post("/agent/{ticket_id}/resolve")
 def agent_resolve(ticket_id: str) -> Dict[str, str]:
     try:
-        session_store.resolve_ticket(ticket_id)
+        session_id = session_store.resolve_ticket(ticket_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+    # Bug fix: resolve_ticket() only clears the SQL-level conversation_mode.
+    # handover_node separately sets is_handover_active=True as a field in
+    # the LangGraph checkpoint for this thread_id — and since no node ever
+    # resets it back to False, that flag persisted forever across every
+    # future turn once a session had been handed over even once. Every
+    # message after resolve was reading that stale True and immediately
+    # re-triggering handover, regardless of the new message's actual
+    # content or confidence. update_state patches just these fields
+    # without touching message history or topic_stack.
+    try:
+        config = {"configurable": {"thread_id": session_id}}
+        compiled_graph.update_state(
+            config,
+            {
+                "is_handover_active": False,
+                "unclear_attempts": 0,
+                "handover_reason": None,
+                "handover_summary": None,
+            },
+        )
+    except Exception as exc:
+        print(f"[agent_resolve] Failed to reset graph state for {session_id}: {exc}")
+
     return {"status": "resolved", "conversation_mode": "ai"}
 
 

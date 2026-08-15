@@ -200,7 +200,11 @@ def list_open_tickets() -> List[Dict[str, Any]]:
     return tickets
 
 
-def resolve_ticket(ticket_id: str) -> None:
+def resolve_ticket(ticket_id: str) -> str:
+    """Returns the session_id, so callers can also reset LangGraph's
+    checkpointed state for that thread (see agent_resolve() in main.py —
+    this function alone only clears the SQL-level conversation_mode,
+    which isn't the only place handover state lives)."""
     with get_connection() as conn:
         row = conn.execute(
             "SELECT session_id FROM agent_queue WHERE ticket_id = ?", (ticket_id,)
@@ -213,6 +217,7 @@ def resolve_ticket(ticket_id: str) -> None:
             "UPDATE session_state SET conversation_mode = 'ai', updated_at = ? WHERE session_id = ?",
             (_now(), row["session_id"]),
         )
+        return row["session_id"]
 
 
 if __name__ == "__main__":

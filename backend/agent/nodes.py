@@ -184,7 +184,7 @@ def intent_node(state: AgentState) -> Dict[str, Any]:
             and previous_intent != resumed_intent
         ):
             topic_stack.append(previous_intent)
-        return {"active_intent": resumed_intent, "topic_stack": topic_stack}
+        return {"active_intent": resumed_intent, "topic_stack": topic_stack, "retrieved_docs": []}
 
     new_intent = _classify_intent(text)
     result_extra: Dict[str, Any] = {}
@@ -216,6 +216,17 @@ def intent_node(state: AgentState) -> Dict[str, Any]:
     return {
         "active_intent": new_intent,
         "topic_stack": topic_stack,
+        # Bug fix: retrieved_docs was only ever written by rag_node, never
+        # cleared. On any turn that skips RAG (a tool call, SMALL_TALK),
+        # the checkpoint kept whatever docs were retrieved several turns
+        # ago, and confidence_node scored THIS turn against THAT stale,
+        # unrelated similarity — e.g. a plain "hi" or a balance request
+        # inheriting a bad match score from a completely different
+        # earlier question, triggering a false handover. intent_node runs
+        # first on every turn regardless of routing, so resetting here
+        # guarantees a clean slate; rag_node still overwrites it fresh
+        # whenever it actually runs afterward.
+        "retrieved_docs": [],
         **result_extra,
     }
 

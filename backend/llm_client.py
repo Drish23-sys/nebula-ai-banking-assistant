@@ -54,10 +54,38 @@ def _build_context_block(
     return "\n\n".join(parts) if parts else "(no supporting context available)"
 
 
+def _history_to_chat_messages(conversation_history: Optional[List[Any]], max_turns: int = 8) -> List[Dict[str, str]]:
+    """
+    Converts recent LangGraph BaseMessage objects into the plain
+    role/content dicts both Ollama and Groq expect, so prior turns
+    actually reach the model instead of every reply being generated as
+    if the conversation just started. Capped to the last `max_turns`
+    messages — enough for real continuity (referring back to something
+    said a couple of turns ago, not restating context already given)
+    without unbounded prompt growth as a session gets long.
+    """
+    if not conversation_history:
+        return []
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    out = []
+    for msg in conversation_history[-max_turns:]:
+        if isinstance(msg, HumanMessage):
+            out.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            out.append({"role": "assistant", "content": msg.content})
+        # Other message types (System, Tool) skipped — SYSTEM_PROMPT
+        # already covers the system role, and tool messages aren't
+        # meaningful to replay as conversational turns.
+    return out
+
+
 def generate_reply(
     user_message: str,
     tool_result: Optional[Dict[str, Any]] = None,
     retrieved_docs: Optional[List[Dict[str, Any]]] = None,
+    conversation_history: Optional[List[Any]] = None,
     model: Optional[str] = None,
     timeout_seconds: float = 30.0,
 ) -> Optional[str]:
@@ -70,16 +98,26 @@ def generate_reply(
     var's comment in config.py. Same system prompt and context-block
     logic either way, so reply quality/grounding behavior is consistent
     regardless of which provider is active.
+
+    conversation_history (recent prior turns from the graph's checkpointed
+    `messages`, NOT including the current turn) is threaded through as
+    real chat history rather than folded into the text block, so the
+    model can actually reference earlier parts of the conversation —
+    without this, every reply was generated as if the conversation had
+    just started, regardless of what was said a turn or two earlier.
     """
     context_block = _build_context_block(tool_result, retrieved_docs)
     user_prompt = f"CONTEXT:\n{context_block}\n\nCUSTOMER MESSAGE:\n{user_message}"
+    history_messages = _history_to_chat_messages(conversation_history)
 
     if LLM_PROVIDER == "groq":
-        return _generate_reply_groq(user_prompt, model or GROQ_FALLBACK_MODEL, timeout_seconds)
-    return _generate_reply_ollama(user_prompt, model or PRIMARY_LLM_MODEL, timeout_seconds)
+        return _generate_reply_groq(user_prompt, history_messages, model or GROQ_FALLBACK_MODEL, timeout_seconds)
+    return _generate_reply_ollama(user_prompt, history_messages, model or PRIMARY_LLM_MODEL, timeout_seconds)
 
 
-def _generate_reply_ollama(user_prompt: str, model: str, timeout_seconds: float) -> Optional[str]:
+def _generate_reply_ollama(
+    user_prompt: str, history_messages: List[Dict[str, str]], model: str, timeout_seconds: float
+) -> Optional[str]:
     try:
         import ollama
 
@@ -88,6 +126,7 @@ def _generate_reply_ollama(user_prompt: str, model: str, timeout_seconds: float)
             model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
+                *history_messages,
                 {"role": "user", "content": user_prompt},
             ],
             options={"temperature": 0.3},
@@ -102,7 +141,9 @@ def _generate_reply_ollama(user_prompt: str, model: str, timeout_seconds: float)
         return None
 
 
-def _generate_reply_groq(user_prompt: str, model: str, timeout_seconds: float) -> Optional[str]:
+def _generate_reply_groq(
+    user_prompt: str, history_messages: List[Dict[str, str]], model: str, timeout_seconds: float
+) -> Optional[str]:
     if not GROQ_API_KEY:
         print("[llm_client] LLM_PROVIDER=groq but no GROQ_API_KEY set — falling back to template.")
         return None
@@ -115,6 +156,7 @@ def _generate_reply_groq(user_prompt: str, model: str, timeout_seconds: float) -
             model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
+                *history_messages,
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
