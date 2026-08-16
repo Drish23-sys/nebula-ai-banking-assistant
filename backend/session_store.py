@@ -90,6 +90,31 @@ def init_schema() -> None:
     with get_connection() as conn:
         conn.execute_script(SCHEMA_STATEMENTS)
 
+        # Migration: conversation_started_at was added to session_state
+        # after this table already existed in the real Turso database —
+        # CREATE TABLE IF NOT EXISTS is a no-op against an existing
+        # table, so the column was simply missing, and every call to
+        # get_messages_since() (customer polling AND the agent
+        # dashboard) was crashing with "no such column:
+        # conversation_started_at". ALTER TABLE ADD COLUMN retroactively
+        # adds it; the try/except makes this safe to run on every
+        # startup — it'll fail harmlessly once the column already exists
+        # on all future deploys.
+        try:
+            conn.execute("ALTER TABLE session_state ADD COLUMN conversation_started_at TEXT")
+        except Exception:
+            pass  # column already exists — expected on every run after the first
+
+        # Backfill: existing rows get conversation_started_at = created_at
+        # rather than staying NULL, so "how much history is visible"
+        # behaves sensibly for sessions that existed before this feature
+        # (NULL would just mean "no boundary" — not wrong, but less clean
+        # than actually having a value).
+        conn.execute(
+            "UPDATE session_state SET conversation_started_at = created_at "
+            "WHERE conversation_started_at IS NULL"
+        )
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
