@@ -47,7 +47,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 # already used locally via Ollama, just hosted instead of local.
 # ---------------------------------------------------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_HANDOVER_MODEL = os.getenv("GROQ_HANDOVER_MODEL", "llama-3.3-70b-versatile")
+GROQ_HANDOVER_MODEL = os.getenv("GROQ_HANDOVER_MODEL", "openai/gpt-oss-120b")
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-120b")
 
 # ---------------------------------------------------------------------------
