@@ -6,7 +6,7 @@ import TypingIndicator from "./components/TypingIndicator";
 import ChatInput from "./components/ChatInput";
 import LoginForm from "./components/LoginForm";
 import SplashScreen from "./components/SplashScreen";
-import { sendMessage, pollStatus } from "./api";
+import { sendMessage, pollStatus, resetConversation } from "./api";
 
 const AUTH_STORAGE_KEY = "nebula_auth";
 
@@ -163,15 +163,16 @@ export default function App() {
     return () => clearInterval(interval);
   }, [auth, conversationMode]);
 
-  const handleReset = () => {
+  const handleReset = async () => {
     setMessages([]);
     setConversationMode("ai");
     seenMessageIds.current = new Set();
     lastPollTs.current = null;
-    // Note: this only clears the local view — chat history is tied to
-    // the account server-side (72h retention), not the browser tab, so
-    // it'll still be there on next login. A real "clear" would need a
-    // backend endpoint; this is just "start a fresh screen."
+    try {
+      await resetConversation({ token: auth.token });
+    } catch (err) {
+      console.error("Failed to reset conversation server-side:", err);
+    }
   };
 
   if (showSplash) {

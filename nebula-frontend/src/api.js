@@ -57,3 +57,12 @@ export async function pollStatus({ token, sessionId, since }) {
   if (!resp.ok) throw new Error(await parseErrorDetail(resp));
   return resp.json();
 }
+
+export async function resetConversation({ token }) {
+  const resp = await fetch(`${BASE_URL}/chat/reset`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!resp.ok) throw new Error(await parseErrorDetail(resp));
+  return resp.json();
+}

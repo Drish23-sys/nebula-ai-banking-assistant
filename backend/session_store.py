@@ -31,11 +31,12 @@ from backend.config import MESSAGE_RETENTION_HOURS  # noqa: E402
 SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS session_state (
-        session_id          TEXT PRIMARY KEY,
-        user_id             TEXT NOT NULL,
-        conversation_mode   TEXT NOT NULL DEFAULT 'ai' CHECK (conversation_mode IN ('ai', 'human')),
-        created_at          TEXT NOT NULL,
-        updated_at          TEXT NOT NULL
+        session_id              TEXT PRIMARY KEY,
+        user_id                 TEXT NOT NULL,
+        conversation_mode       TEXT NOT NULL DEFAULT 'ai' CHECK (conversation_mode IN ('ai', 'human')),
+        conversation_started_at TEXT NOT NULL,
+        created_at              TEXT NOT NULL,
+        updated_at              TEXT NOT NULL
     )
     """,
     """
@@ -107,14 +108,15 @@ def get_or_create_session(session_id: str, user_id: str) -> Dict[str, Any]:
 
         now = _now()
         conn.execute(
-            "INSERT INTO session_state (session_id, user_id, conversation_mode, created_at, updated_at) "
-            "VALUES (?, ?, 'ai', ?, ?)",
-            (session_id, user_id, now, now),
+            "INSERT INTO session_state (session_id, user_id, conversation_mode, conversation_started_at, created_at, updated_at) "
+            "VALUES (?, ?, 'ai', ?, ?, ?)",
+            (session_id, user_id, now, now, now),
         )
         return {
             "session_id": session_id,
             "user_id": user_id,
             "conversation_mode": "ai",
+            "conversation_started_at": now,
             "created_at": now,
             "updated_at": now,
         }
@@ -135,6 +137,37 @@ def set_conversation_mode(session_id: str, mode: str) -> None:
         conn.execute(
             "UPDATE session_state SET conversation_mode = ?, updated_at = ? WHERE session_id = ?",
             (mode, _now(), session_id),
+        )
+
+
+def reset_conversation(session_id: str) -> None:
+    """
+    The real "start new conversation" — bumps conversation_started_at so
+    get_messages_since() stops surfacing anything before this point (old
+    messages stay in storage, still subject to normal 72h retention —
+    this isn't a delete, just a "stop showing this by default" boundary),
+    and forces conversation_mode back to 'ai' in case the customer resets
+    while still waiting on a human agent.
+
+    Does NOT touch LangGraph's own checkpointed state (topic_stack,
+    is_handover_active, etc.) — that's a separate concern, reset by the
+    caller in main.py via compiled_graph.update_state(), the same way
+    agent_resolve() already does.
+    """
+    now = _now()
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE session_state SET conversation_mode = 'ai', conversation_started_at = ?, updated_at = ? "
+            "WHERE session_id = ?",
+            (now, now, session_id),
+        )
+        # If the customer resets while an agent still has an open ticket
+        # for them, don't leave it stranded in the queue forever — the
+        # customer walked away from that issue, so close it out rather
+        # than making an agent discover a conversation that's moved on.
+        conn.execute(
+            "UPDATE agent_queue SET status = 'resolved' WHERE session_id = ? AND status = 'open'",
+            (session_id,),
         )
 
 
@@ -159,15 +192,27 @@ def append_message(session_id: str, role: str, text: str) -> Dict[str, Any]:
 
 
 def get_messages_since(session_id: str, since_timestamp: Optional[str] = None) -> List[Dict[str, Any]]:
-    # Retention: never return messages older than MESSAGE_RETENTION_HOURS,
-    # regardless of `since_timestamp`. Combined with `since_timestamp`
-    # (whichever cutoff is more recent effectively wins) so this works
-    # correctly for both the initial full-history fetch (since_timestamp
-    # is None) and incremental polling.
+    # Three possible floors on what counts as "visible history" — the
+    # latest (most restrictive) one wins:
+    #   1. since_timestamp    — incremental polling cursor
+    #   2. retention_cutoff   — 72h auto-expiry
+    #   3. conversation_started_at — customer explicitly reset (see
+    #      reset_conversation()); old messages still exist in storage
+    #      (still subject to normal 72h retention) but stop being shown
+    #      by default once a fresh start has been requested.
     retention_cutoff = (datetime.now(timezone.utc) - timedelta(hours=MESSAGE_RETENTION_HOURS)).isoformat()
-    effective_since = max(since_timestamp, retention_cutoff) if since_timestamp else retention_cutoff
 
     with get_connection() as conn:
+        session_row = conn.execute(
+            "SELECT conversation_started_at FROM session_state WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        floors = [retention_cutoff]
+        if since_timestamp:
+            floors.append(since_timestamp)
+        if session_row and session_row["conversation_started_at"]:
+            floors.append(session_row["conversation_started_at"])
+        effective_since = max(floors)
+
         rows = conn.execute(
             "SELECT * FROM messages WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC",
             (session_id, effective_since),

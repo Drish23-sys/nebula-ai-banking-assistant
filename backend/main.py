@@ -364,6 +364,48 @@ def chat(req: ChatRequest, user: Dict[str, Any] = Depends(require_user)) -> Chat
     )
 
 
+@app.post("/chat/reset")
+def chat_reset(user: Dict[str, Any] = Depends(require_user)) -> Dict[str, str]:
+    """
+    The real "start new conversation" — unlike the frontend's old Reset
+    button (which only cleared what was on screen), this actually moves
+    the conversation_started_at boundary forward server-side, so old
+    messages stop being shown by default (they're not deleted — still
+    subject to the normal 72h retention window on their own timeline),
+    forces conversation_mode back to 'ai', and auto-resolves any open
+    ticket the customer was mid-handover on rather than leaving it
+    stranded in the agent queue.
+
+    Also resets LangGraph's own checkpointed reasoning state for this
+    thread — same idea as agent_resolve()'s fix, but more complete,
+    since a customer-initiated fresh start should clear everything
+    (topic_stack, out-of-scope/unclear attempt counters, retrieved_docs)
+    rather than just the handover flags.
+    """
+    session_id = _session_id_for_user(user["user_id"])
+    session_store.reset_conversation(session_id)
+
+    try:
+        config = {"configurable": {"thread_id": session_id}}
+        compiled_graph.update_state(
+            config,
+            {
+                "is_handover_active": False,
+                "unclear_attempts": 0,
+                "out_of_scope_attempts": 0,
+                "handover_reason": None,
+                "handover_summary": None,
+                "topic_stack": [],
+                "active_intent": "",
+                "retrieved_docs": [],
+            },
+        )
+    except Exception as exc:
+        print(f"[chat_reset] Failed to reset graph state for {session_id}: {exc}")
+
+    return {"status": "reset", "conversation_mode": "ai"}
+
+
 @app.get("/chat/{session_id}/status")
 def chat_status(session_id: str, since: Optional[str] = None, user: Dict[str, Any] = Depends(require_user)) -> Dict[str, Any]:
     # Same identity rule as /chat: derive the real session_id from the
