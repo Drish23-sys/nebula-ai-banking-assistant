@@ -21,13 +21,14 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/..")
-from backend import session_store  # noqa: E402
+from backend import auth, session_store  # noqa: E402
+from backend.redaction import redact_sensitive  # noqa: E402
 from backend.agent.graph import compiled_graph, TOOL_INTENTS  # noqa: E402
 from backend.agent.state import new_state  # noqa: E402
 from backend.config import API_HOST, API_PORT  # noqa: E402
@@ -78,6 +79,45 @@ def _startup() -> None:
 # ---------------------------------------------------------------------------
 # Request/response models — mirror docs/FRONTEND_HANDOFF.md §1 exactly.
 # ---------------------------------------------------------------------------
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    user_id: str
+    email: str
+    token: str
+    session_id: str  # derived deterministically from user_id — see require_user()
+
+
+def _session_id_for_user(user_id: str) -> str:
+    """One persistent conversation per account, so a returning customer
+    resumes their same thread automatically rather than starting fresh
+    every login. Deterministic on purpose — no need to store this
+    mapping separately."""
+    return f"sess_{user_id}"
+
+
+def require_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """FastAPI dependency for routes that need a logged-in customer.
+    Expects `Authorization: Bearer <token>`. Raises 401 on anything
+    missing/invalid — deliberately the same error for both, same
+    reasoning as auth.login()'s generic message."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header.")
+    token = authorization.removeprefix("Bearer ").strip()
+    user = auth.get_current_user(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session — please log in again.")
+    return user
+
+
 class ChatRequest(BaseModel):
     session_id: str
     user_id: str
@@ -203,22 +243,60 @@ def _build_quick_actions(decision: Optional[str]) -> List[str]:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+@app.post("/auth/signup", response_model=AuthResponse)
+def signup(req: SignupRequest) -> AuthResponse:
+    try:
+        result = auth.signup(req.email, req.password)
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return AuthResponse(**result, session_id=_session_id_for_user(result["user_id"]))
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+def login(req: LoginRequest) -> AuthResponse:
+    try:
+        result = auth.login(req.email, req.password)
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+    return AuthResponse(**result, session_id=_session_id_for_user(result["user_id"]))
+
+
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
-    session = session_store.get_or_create_session(req.session_id, req.user_id)
-    session_store.append_message(req.session_id, "user", req.message)
+def chat(req: ChatRequest, user: Dict[str, Any] = Depends(require_user)) -> ChatResponse:
+    # user_id and session_id are derived from the authenticated token,
+    # NOT trusted from the request body — otherwise any logged-in
+    # customer could read/write another customer's session just by
+    # changing the JSON they send. req.session_id / req.user_id are
+    # still accepted for backward compatibility with the request shape
+    # but intentionally unused for identity.
+    user_id = user["user_id"]
+    session_id = _session_id_for_user(user_id)
+
+    # Mask card numbers / SSNs / long account-style digit runs before this
+    # message ever touches storage, the AI graph, or an agent's screen —
+    # applied once, here, so every downstream consumer (session_store,
+    # LangGraph, generate_reply's conversation history, the agent
+    # dashboard's thread view) only ever sees the redacted version. None
+    # of the tool functions need a customer-typed full number anyway —
+    # lock_card only ever needs last4, which stays visible.
+    message = redact_sensitive(req.message)
+
+    session_store.purge_expired_messages()  # opportunistic 72h retention housekeeping
+
+    session = session_store.get_or_create_session(session_id, user_id)
+    session_store.append_message(session_id, "user", message)
 
     if session["conversation_mode"] == "human":
         # A live agent owns this session — don't invoke the AI graph at
         # all (§4.5). The message is logged; Tab 2 will show it via polling.
         return ChatResponse(
-            session_id=req.session_id,
+            session_id=session_id,
             reply="",
             conversation_mode="human",
             handover_triggered=False,
         )
 
-    config = {"configurable": {"thread_id": req.session_id}}
+    config = {"configurable": {"thread_id": session_id}}
 
     # CRITICAL: only build a brand-new AgentState on this thread's first
     # turn. On every later turn, pass just the new message and let
@@ -235,14 +313,14 @@ def chat(req: ChatRequest) -> ChatResponse:
     # "balance"). Caught by a deliberately keyword-free resume-phrase
     # test — see the graph.py smoke test's sibling check in scripts/.
     if not compiled_graph.get_state(config).values:
-        graph_state = new_state(session_id=req.session_id, user_id=req.user_id)
-        graph_state["messages"] = [HumanMessage(content=req.message)]
+        graph_state = new_state(session_id=session_id, user_id=user_id)
+        graph_state["messages"] = [HumanMessage(content=message)]
     else:
-        graph_state = {"messages": [HumanMessage(content=req.message)]}
+        graph_state = {"messages": [HumanMessage(content=message)]}
 
     result = compiled_graph.invoke(graph_state, config=config)
 
-    reply_text = _draft_reply(result, req.message)
+    reply_text = _draft_reply(result, message)
     handover_triggered = bool(result.get("is_handover_active"))
 
     # Bug fix: handover can trigger two ways — an explicit HANDOVER intent
@@ -261,11 +339,11 @@ def chat(req: ChatRequest) -> ChatResponse:
     if handover_triggered:
         trigger_reason = result.get("handover_reason") or "explicit_request"
         session_store.create_ticket(
-            req.session_id, trigger_reason, result.get("handover_summary") or {}
+            session_id, trigger_reason, result.get("handover_summary") or {}
         )
-        session_store.set_conversation_mode(req.session_id, "human")
+        session_store.set_conversation_mode(session_id, "human")
 
-    session_store.append_message(req.session_id, "assistant", reply_text)
+    session_store.append_message(session_id, "assistant", reply_text)
 
     confidence = None
     if result.get("confidence_breakdown"):
@@ -276,7 +354,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         }
 
     return ChatResponse(
-        session_id=req.session_id,
+        session_id=session_id,
         reply=reply_text,
         conversation_mode="human" if handover_triggered else "ai",
         confidence=confidence,
@@ -287,7 +365,37 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 
 @app.get("/chat/{session_id}/status")
-def chat_status(session_id: str, since: Optional[str] = None) -> Dict[str, Any]:
+def chat_status(session_id: str, since: Optional[str] = None, user: Dict[str, Any] = Depends(require_user)) -> Dict[str, Any]:
+    # Same identity rule as /chat: derive the real session_id from the
+    # authenticated token rather than trusting the URL's session_id —
+    # otherwise any logged-in customer could poll another customer's
+    # chat just by guessing/changing the path parameter.
+    real_session_id = _session_id_for_user(user["user_id"])
+    mode = session_store.get_conversation_mode(real_session_id)
+    new_messages = session_store.get_messages_since(real_session_id, since_timestamp=since)
+    return {
+        "conversation_mode": mode,
+        "new_messages": [
+            {"message_id": m["message_id"], "role": m["role"], "text": m["text"], "timestamp": m["timestamp"]}
+            for m in new_messages
+        ],
+    }
+
+
+@app.get("/agent/session/{session_id}/messages")
+def agent_session_messages(session_id: str, since: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Agent-facing equivalent of /chat/{session_id}/status — deliberately
+    separate rather than reused, because that customer route requires a
+    customer's login token and derives session_id from THEIR identity
+    (correct for self-service polling, see require_user()). The agent
+    dashboard has no login of its own and legitimately needs to view any
+    customer's session by session_id directly — reusing the customer
+    route meant every poll silently 401'd and tickets showed "No
+    messages yet." forever, with no visible error. Unauthenticated like
+    the rest of /agent/*, consistent with this whole namespace's existing
+    internal-tool trust model (agent_queue, agent_reply, agent_resolve).
+    """
     mode = session_store.get_conversation_mode(session_id)
     new_messages = session_store.get_messages_since(session_id, since_timestamp=since)
     return {

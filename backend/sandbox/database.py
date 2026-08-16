@@ -13,6 +13,7 @@ Run directly to (re)create and seed the sandbox DB:
 import os
 import sqlite3
 import sys
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -145,6 +146,48 @@ def seed_demo_data(db_path: str = SANDBOX_DB_PATH, reset: bool = True) -> None:
             "(transaction_id, account_id, description, amount, direction, occurred_at, flagged) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             ("TXN-1003", "CHK-4821", "Unknown Merchant Charge", 1800.00, "debit", _now(offset_hours=2), 1),
+        )
+
+
+def provision_demo_account(user_id: str, full_name: str = "New Customer", email: str = "") -> None:
+    """
+    Called from backend/auth.py right after a new signup, since the
+    sandbox DB only ever had the one hardcoded demo user (USR-4401) —
+    without this, every tool call (balance, cards, transfers) would
+    fail with "no account found" for anyone who actually creates a real
+    account. Gives every new signup the same demo-quality starting data
+    (one checking + one savings account, one debit card) as the
+    original hardcoded demo user, just with fresh IDs and zero
+    transaction history.
+    """
+    short = uuid.uuid4().hex[:6].upper()
+    checking_id = f"CHK-{short}"
+    savings_id = f"SAV-{short}"
+    card_id = f"CARD-{short}"
+
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, full_name, email, verified, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (user_id, full_name, email, 1, _now()),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO accounts "
+            "(account_id, user_id, account_type, balance, currency, daily_transfer_limit) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (checking_id, user_id, "checking", 1000.00, "USD", 5000.0),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO accounts "
+            "(account_id, user_id, account_type, balance, currency, daily_transfer_limit) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (savings_id, user_id, "savings", 500.00, "USD", 2000.0),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO cards "
+            "(card_id, user_id, account_id, card_type, last4, status, lock_reference) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (card_id, user_id, checking_id, "debit", short[-4:], "active", None),
         )
 
 

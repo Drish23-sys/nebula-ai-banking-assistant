@@ -86,8 +86,24 @@ CONFIDENCE_CLARIFY_THRESHOLD = 0.50
 UNCLEAR_ATTEMPTS_HANDOVER_LIMIT = 2  # §4.3 trigger 2: low confidence twice consecutively
 
 # ---------------------------------------------------------------------------
-# FastAPI
+# Turso (libSQL) — cloud storage for session/message/ticket/user data, so
+# it survives Render restarts and redeploys (local SQLite alone doesn't —
+# Render's free tier wipes local disk on every restart). Leave both unset
+# for local dev without a Turso account: session_store falls back to a
+# local SQLite file automatically (see backend/db.py).
 # ---------------------------------------------------------------------------
+TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
+TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
+
+# Local SQLite fallback path, used only when TURSO_DATABASE_URL is unset.
+# Deliberately a separate file from SANDBOX_DB_PATH (the mock bank data) —
+# session/user data has a different lifecycle than the demo banking data.
+LOCAL_SESSION_DB_PATH = os.getenv("LOCAL_SESSION_DB_PATH", "data/session_store.db")
+
+# How long a customer's chat history is kept before it's eligible for
+# cleanup. Enforced at read-time (old messages excluded from what's
+# returned) and opportunistically purged — see session_store.py.
+MESSAGE_RETENTION_HOURS = int(os.getenv("MESSAGE_RETENTION_HOURS", "72"))
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 
@@ -106,3 +122,33 @@ ALLOWED_ORIGINS = [
     ).split(",")
     if o.strip()
 ]
+
+# ---------------------------------------------------------------------------
+# Turso (cloud SQLite) — backs session/message/ticket storage AND user
+# accounts. Chosen over Postgres because it's SQLite-compatible, so
+# session_store.py's existing query style barely changes; chosen over
+# staying local-file SQLite because Render's free tier wipes local files
+# on every restart/redeploy.
+#
+# Get these from https://turso.tech after creating a database:
+#   turso db create nebula-sessions
+#   turso db show nebula-sessions --url          -> TURSO_DATABASE_URL
+#   turso db tokens create nebula-sessions        -> TURSO_AUTH_TOKEN
+# Leave both unset for local dev — falls back to a local file (see db.py),
+# same as this project's original behavior.
+TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "")
+TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
+
+# ---------------------------------------------------------------------------
+# Auth — simple email + password login for customers.
+# ---------------------------------------------------------------------------
+# Generate a real random secret for production, e.g.:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+# and set it as an env var — never commit a real secret to the repo.
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-only-insecure-secret-change-me")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "72"))  # matches message retention window
+
+# Chat history (messages table) older than this is treated as expired —
+# filtered out of reads, and purged by session_store.cleanup_expired_messages().
+MESSAGE_RETENTION_HOURS = int(os.getenv("MESSAGE_RETENTION_HOURS", "72"))

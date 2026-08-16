@@ -1,8 +1,9 @@
 """
 backend/session_store.py
 
-Durable session + handover-queue persistence (PRD §4.5, and the exact
-schema promised to the frontend in docs/FRONTEND_HANDOFF.md §2).
+Durable session + handover-queue + user-account persistence (PRD §4.5,
+and the exact schema promised to the frontend in docs/FRONTEND_HANDOFF.md
+§2).
 
 This is the source of truth for `conversation_mode` ("ai" | "human") —
 checked by main.py *before* the LangGraph graph is invoked at all, so a
@@ -10,73 +11,83 @@ session mid-handover never gets routed back through the AI agent by
 accident. Don't conflate this with AgentState's per-invocation graph
 state (see the note in backend/agent/state.py).
 
-Same connection pattern as backend/sandbox/database.py (SQLite,
-context-managed) — intentionally consistent, not a second DB technology.
+Storage backend: Turso (cloud) when configured, local SQLite file
+otherwise — see backend/db.py for that switch. This module's own code
+doesn't care which one is actually running underneath; get_connection()
+here just delegates to db.py.
 """
 
 import json
 import os
-import sqlite3
 import sys
 import uuid
-from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from backend.config import SANDBOX_DB_PATH  # noqa: E402
+from backend import db  # noqa: E402
+from backend.config import MESSAGE_RETENTION_HOURS  # noqa: E402
 
-# Reuses the same SQLite file as the sandbox DB — separate tables, one
-# less moving part than a second .db file for a hackathon-scoped build.
-SESSION_DB_PATH = os.getenv("SESSION_DB_PATH", SANDBOX_DB_PATH)
+SCHEMA_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS session_state (
+        session_id          TEXT PRIMARY KEY,
+        user_id             TEXT NOT NULL,
+        conversation_mode   TEXT NOT NULL DEFAULT 'ai' CHECK (conversation_mode IN ('ai', 'human')),
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS messages (
+        message_id   TEXT PRIMARY KEY,
+        session_id   TEXT NOT NULL REFERENCES session_state(session_id),
+        role         TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'agent', 'system')),
+        text         TEXT NOT NULL,
+        timestamp    TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS agent_queue (
+        ticket_id     TEXT PRIMARY KEY,
+        session_id    TEXT NOT NULL REFERENCES session_state(session_id),
+        trigger_reason TEXT NOT NULL CHECK (
+            trigger_reason IN ('fraud_flag', 'low_confidence_repeated', 'explicit_request', 'out_of_scope')
+        ),
+        summary_json  TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
+        created_at    TEXT NOT NULL
+    )
+    """,
+    # --- Auth: email+password accounts, so a returning customer's chat
+    # history and bank details stay tied to them across visits, rather
+    # than resetting to the shared demo user on every new browser tab. ---
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        user_id        TEXT PRIMARY KEY,
+        email          TEXT NOT NULL UNIQUE,
+        password_hash  TEXT NOT NULL,
+        created_at     TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS auth_tokens (
+        token       TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(user_id),
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL
+    )
+    """,
+]
 
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS session_state (
-    session_id          TEXT PRIMARY KEY,
-    user_id             TEXT NOT NULL,
-    conversation_mode   TEXT NOT NULL DEFAULT 'ai' CHECK (conversation_mode IN ('ai', 'human')),
-    created_at          TEXT NOT NULL,
-    updated_at          TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    message_id   TEXT PRIMARY KEY,
-    session_id   TEXT NOT NULL REFERENCES session_state(session_id),
-    role         TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'agent', 'system')),
-    text         TEXT NOT NULL,
-    timestamp    TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS agent_queue (
-    ticket_id     TEXT PRIMARY KEY,
-    session_id    TEXT NOT NULL REFERENCES session_state(session_id),
-    trigger_reason TEXT NOT NULL CHECK (
-        trigger_reason IN ('fraud_flag', 'low_confidence_repeated', 'explicit_request', 'out_of_scope')
-    ),
-    summary_json  TEXT NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
-    created_at    TEXT NOT NULL
-);
-"""
+def get_connection() -> db.Connection:
+    return db.get_db_connection()
 
 
-@contextmanager
-def get_connection(db_path: str = SESSION_DB_PATH):
-    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def init_schema(db_path: str = SESSION_DB_PATH) -> None:
-    with get_connection(db_path) as conn:
-        conn.executescript(SCHEMA)
+def init_schema() -> None:
+    with get_connection() as conn:
+        conn.execute_script(SCHEMA_STATEMENTS)
 
 
 def _now() -> str:
@@ -141,24 +152,43 @@ def append_message(session_id: str, role: str, text: str) -> Dict[str, Any]:
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO messages (message_id, session_id, role, text, timestamp) "
-            "VALUES (:message_id, :session_id, :role, :text, :timestamp)",
-            message,
+            "VALUES (?, ?, ?, ?, ?)",
+            (message["message_id"], message["session_id"], message["role"], message["text"], message["timestamp"]),
         )
     return message
 
 
 def get_messages_since(session_id: str, since_timestamp: Optional[str] = None) -> List[Dict[str, Any]]:
+    # Retention: never return messages older than MESSAGE_RETENTION_HOURS,
+    # regardless of `since_timestamp`. Combined with `since_timestamp`
+    # (whichever cutoff is more recent effectively wins) so this works
+    # correctly for both the initial full-history fetch (since_timestamp
+    # is None) and incremental polling.
+    retention_cutoff = (datetime.now(timezone.utc) - timedelta(hours=MESSAGE_RETENTION_HOURS)).isoformat()
+    effective_since = max(since_timestamp, retention_cutoff) if since_timestamp else retention_cutoff
+
     with get_connection() as conn:
-        if since_timestamp:
-            rows = conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC",
-                (session_id, since_timestamp),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp ASC", (session_id,)
-            ).fetchall()
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC",
+            (session_id, effective_since),
+        ).fetchall()
     return [dict(r) for r in rows]
+
+
+def purge_expired_messages() -> int:
+    """Deletes messages older than MESSAGE_RETENTION_HOURS across all
+    sessions. get_messages_since() already filters these out at read
+    time regardless, so this isn't required for correctness — it's
+    housekeeping, to stop old rows accumulating forever. Called
+    opportunistically (see main.py's /chat route) rather than on a
+    schedule, since Render's free tier has no built-in cron and this
+    keeps the implementation simple. Returns the number of rows deleted.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=MESSAGE_RETENTION_HOURS)).isoformat()
+    with get_connection() as conn:
+        deleted = conn.execute("SELECT message_id FROM messages WHERE timestamp <= ?", (cutoff,)).fetchall()
+        conn.execute("DELETE FROM messages WHERE timestamp <= ?", (cutoff,))
+    return len(deleted)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +216,7 @@ def create_ticket(session_id: str, trigger_reason: str, summary: Dict[str, Any])
 def list_open_tickets() -> List[Dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT q.*, s.user_id, u.full_name AS user_name FROM agent_queue q "
+            "SELECT q.*, s.user_id, u.email AS user_name FROM agent_queue q "
             "JOIN session_state s ON s.session_id = q.session_id "
             "LEFT JOIN users u ON u.user_id = s.user_id "
             "WHERE q.status = 'open' ORDER BY q.created_at ASC"
@@ -218,6 +248,70 @@ def resolve_ticket(ticket_id: str) -> str:
             (_now(), row["session_id"]),
         )
         return row["session_id"]
+
+
+# ---------------------------------------------------------------------------
+# users / auth_tokens
+# ---------------------------------------------------------------------------
+def create_user(email: str, password_hash: str) -> Dict[str, Any]:
+    """Raises sqlite3/libsql's integrity error if the email is already
+    taken — caller (backend/auth.py) is expected to catch and translate
+    that into a clean 409 response rather than a raw 500."""
+    user = {
+        "user_id": f"USR-{uuid.uuid4().hex[:8].upper()}",
+        "email": email.lower().strip(),
+        "password_hash": password_hash,
+        "created_at": _now(),
+    }
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO users (user_id, email, password_hash, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (user["user_id"], user["email"], user["password_hash"], user["created_at"]),
+        )
+    return user
+
+
+def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE email = ?", (email.lower().strip(),)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def create_auth_token(user_id: str, token: str, ttl_days: int = 30) -> Dict[str, Any]:
+    record = {
+        "token": token,
+        "user_id": user_id,
+        "created_at": _now(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat(),
+    }
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO auth_tokens (token, user_id, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (record["token"], record["user_id"], record["created_at"], record["expires_at"]),
+        )
+    return record
+
+
+def get_user_by_token(token: str) -> Optional[Dict[str, Any]]:
+    """Returns the user dict if the token exists and hasn't expired,
+    else None — main.py's auth dependency treats None as 401."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT u.* FROM auth_tokens t JOIN users u ON u.user_id = t.user_id "
+            "WHERE t.token = ? AND t.expires_at > ?",
+            (token, _now()),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 if __name__ == "__main__":
