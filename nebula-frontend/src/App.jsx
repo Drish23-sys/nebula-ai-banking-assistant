@@ -4,16 +4,24 @@ import ConnectionBanner from "./components/ConnectionBanner";
 import MessageBubble from "./components/MessageBubble";
 import TypingIndicator from "./components/TypingIndicator";
 import ChatInput from "./components/ChatInput";
+import LoginForm from "./components/LoginForm";
+import SplashScreen from "./components/SplashScreen";
 import { sendMessage, pollStatus } from "./api";
 
-const USER_ID = "USR-4401"; // demo user; swap for real auth later
+const AUTH_STORAGE_KEY = "nebula_auth";
 
-function newSessionId() {
-  return `sess_${crypto.randomUUID().slice(0, 8)}`;
+function loadStoredAuth() {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 
 export default function App() {
-  const [sessionId, setSessionId] = useState(newSessionId);
+  const [auth, setAuth] = useState(loadStoredAuth); // { user_id, email, token, session_id } | null
+  const [showSplash, setShowSplash] = useState(true);
   const [messages, setMessages] = useState([]);
   const [conversationMode, setConversationMode] = useState("ai");
   const [sending, setSending] = useState(false);
@@ -24,6 +32,57 @@ export default function App() {
   const lastPollTs = useRef(null);
   const listEndRef = useRef(null);
 
+  const handleAuthenticated = (result) => {
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(result));
+    setAuth(result);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+    setAuth(null);
+    setMessages([]);
+    setConversationMode("ai");
+    seenMessageIds.current = new Set();
+    lastPollTs.current = null;
+  };
+
+  // On login (including a returning session restored from localStorage),
+  // load whatever history the account already has — without this, a
+  // customer's chat would appear empty on every page load even though
+  // it's genuinely persisted server-side for 72h. Seeds seenMessageIds/
+  // lastPollTs so the live poll below doesn't re-fetch or duplicate any
+  // of what's loaded here.
+  useEffect(() => {
+    if (!auth) return;
+    let cancelled = false;
+
+    const loadHistory = async () => {
+      try {
+        const data = await pollStatus({ token: auth.token, sessionId: auth.session_id, since: null });
+        if (cancelled) return;
+        setConversationMode(data.conversation_mode || "ai");
+
+        const hydrated = [];
+        for (const msg of data.new_messages || []) {
+          seenMessageIds.current.add(msg.message_id);
+          lastPollTs.current = msg.timestamp;
+          if (msg.role === "user") hydrated.push({ role: "user", text: msg.text });
+          else if (msg.role === "assistant") hydrated.push({ role: "assistant", text: msg.text });
+          else if (msg.role === "agent") hydrated.push({ role: "assistant", text: msg.text, isAgent: true });
+        }
+        setMessages(hydrated);
+      } catch {
+        // Expired/invalid token surfaces naturally on the next send
+        // attempt instead — no need to force a logout just from a
+        // failed background history load.
+      }
+    };
+    loadHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth?.token]);
+
   const scrollToBottom = () => {
     listEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -32,10 +91,16 @@ export default function App() {
 
   const handleSend = useCallback(
     async (text) => {
+      if (!auth) return;
       setMessages((prev) => [...prev, { role: "user", text }]);
       setSending(true);
       try {
-        const data = await sendMessage({ sessionId, userId: USER_ID, message: text });
+        const data = await sendMessage({
+          token: auth.token,
+          sessionId: auth.session_id,
+          userId: auth.user_id,
+          message: text,
+        });
         setConversationMode(data.conversation_mode || "ai");
         if (data.reply) {
           setMessages((prev) => [
@@ -50,6 +115,10 @@ export default function App() {
           ]);
         }
       } catch (err) {
+        if (err.message.includes("expired")) {
+          handleLogout();
+          return;
+        }
         setMessages((prev) => [
           ...prev,
           { role: "assistant", text: `Couldn't reach the backend: ${err.message}` },
@@ -58,19 +127,19 @@ export default function App() {
         setSending(false);
       }
     },
-    [sessionId]
+    [auth]
   );
 
   // Poll /chat/{session_id}/status every 3s while a live agent owns the
-  // session. `since` + message_id dedup mirror the Streamlit version's
-  // fix: without both, this either re-shows the whole history every poll
-  // or silently drops every message after the first.
+  // session. `since` + message_id dedup mirror the earlier fix: without
+  // both, this either re-shows the whole history every poll or silently
+  // drops every message after the first.
   useEffect(() => {
-    if (conversationMode !== "human") return;
+    if (!auth || conversationMode !== "human") return;
 
     const poll = async () => {
       try {
-        const data = await pollStatus({ sessionId, since: lastPollTs.current });
+        const data = await pollStatus({ token: auth.token, sessionId: auth.session_id, since: lastPollTs.current });
         setConversationMode(data.conversation_mode || "human");
 
         const fresh = [];
@@ -92,19 +161,30 @@ export default function App() {
     const interval = setInterval(poll, 3000);
     poll(); // fire immediately on entering human mode, don't wait 3s
     return () => clearInterval(interval);
-  }, [conversationMode, sessionId]);
+  }, [auth, conversationMode]);
 
   const handleReset = () => {
-    setSessionId(newSessionId());
     setMessages([]);
     setConversationMode("ai");
     seenMessageIds.current = new Set();
     lastPollTs.current = null;
+    // Note: this only clears the local view — chat history is tied to
+    // the account server-side (72h retention), not the browser tab, so
+    // it'll still be there on next login. A real "clear" would need a
+    // backend endpoint; this is just "start a fresh screen."
   };
+
+  if (showSplash) {
+      return <SplashScreen onFinish={() => setShowSplash(false)} />;
+}
+
+  if (!auth) {
+    return <LoginForm onAuthenticated={handleAuthenticated} />;
+  }
 
   return (
     <div className="app-shell">
-      <Sidebar sessionId={sessionId} userId={USER_ID} onReset={handleReset} />
+      <Sidebar sessionId={auth.session_id} userId={auth.email} onReset={handleReset} onLogout={handleLogout} />
 
       <main className="chat-panel">
         <ConnectionBanner mode={conversationMode} />

@@ -112,6 +112,138 @@
   background: var(--signal-blue-soft);
 }
 
+.sidebar__logout {
+  margin-top: 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.sidebar__logout:hover {
+  border-color: var(--coral);
+  color: var(--coral);
+}
+
+/* ============================= Auth (login/signup) ============================= */
+
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  position: relative;
+  z-index: 1;
+  padding: 20px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 32px 28px;
+}
+
+.auth-card__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+
+.auth-card__title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.auth-card__subtitle {
+  font-size: 13.5px;
+  color: var(--text-muted);
+  margin: 0 0 24px;
+  line-height: 1.5;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.auth-form__label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.auth-form__label input {
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.auth-form__label input:focus {
+  outline: none;
+  border-color: var(--signal-blue);
+  box-shadow: 0 0 0 3px var(--signal-blue-soft);
+}
+
+.auth-form__error {
+  background: var(--coral-soft);
+  border: 1px solid rgba(255, 92, 114, 0.3);
+  color: var(--text);
+  padding: 10px 13px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.auth-form__submit {
+  background: var(--signal-blue);
+  color: #fff;
+  border: none;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.auth-form__submit:hover:not(:disabled) {
+  background: #2557c4;
+}
+
+.auth-form__submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.auth-card__switch {
+  display: block;
+  margin: 18px auto 0;
+  background: none;
+  border: none;
+  color: var(--cyan-pulse);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.auth-card__switch:hover {
+  text-decoration: underline;
+}
+
 .sidebar__footer {
   margin-top: 18px;
   font-size: 11px;

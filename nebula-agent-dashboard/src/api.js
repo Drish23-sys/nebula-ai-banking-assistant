@@ -23,12 +23,13 @@ export async function resolveTicket(ticketId) {
   return resp.json();
 }
 
-// Same endpoint the customer app polls — reused here so an agent can see
-// the live thread (customer messages + their own sent replies), not just
-// the static ticket summary captured at handover time.
+// Agent-facing endpoint, separate from the customer app's polling route —
+// that one now requires a customer login token and derives the session
+// from their identity, which the agent dashboard has no way to provide
+// (it isn't a logged-in customer). See agent_session_messages() in main.py.
 export async function fetchSessionStatus(sessionId, since) {
   const params = since ? `?since=${encodeURIComponent(since)}` : "";
-  const resp = await fetch(`${BASE_URL}/chat/${sessionId}/status${params}`);
+  const resp = await fetch(`${BASE_URL}/agent/session/${sessionId}/messages${params}`);
   if (!resp.ok) throw new Error(`Backend error: ${resp.status}`);
   return resp.json();
 }
