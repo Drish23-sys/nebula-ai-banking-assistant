@@ -1,5 +1,5 @@
 import Citations from "./Citations";
-import QuickActions from "./QuickActions";
+
 
 export default function MessageBubble({ message, onQuickAction }) {
   const isUser = message.role === "user";
@@ -14,9 +14,7 @@ export default function MessageBubble({ message, onQuickAction }) {
             signal, not something the customer should see. Still available
             on `message.confidence` if an internal/admin view wants it. */}
         {message.citations && <Citations citations={message.citations} />}
-        {message.quickActions && (
-          <QuickActions actions={message.quickActions} onSelect={onQuickAction} />
-        )}
+        
       </div>
     </div>
   );
