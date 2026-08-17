@@ -56,6 +56,12 @@ app.add_middleware(
 def _startup() -> None:
     session_store.init_schema()
 
+    from backend.sandbox.database import backfill_missing_bank_profiles, init_schema as init_sandbox_schema
+    init_sandbox_schema()
+    backfilled = backfill_missing_bank_profiles()
+    if backfilled:
+        print(f"[startup] Backfilled bank profiles for {backfilled} account(s) that were missing one.")
+
     # Ollama loads the model into memory/VRAM on its first request
     # (~15-18s observed), then stays fast (~3.5-4.5s) for subsequent
     # calls as long as it stays loaded — paying that cost here, once, at

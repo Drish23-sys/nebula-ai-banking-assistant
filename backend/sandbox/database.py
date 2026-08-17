@@ -219,6 +219,31 @@ def provision_demo_account(user_id: str, full_name: str = "New Customer", email:
         )
 
 
+def backfill_missing_bank_profiles() -> int:
+    """
+    Catches accounts that signed up before bank-profile provisioning was
+    fixed to persist properly (see the module docstring) — anyone who
+    has a login (users table, on Turso) but no matching bank_customers
+    row would otherwise be permanently stuck seeing "No accounts found"
+    on every tool call, since normal signup only provisions once, at
+    signup time. Both tables now live in the same Turso database (that's
+    exactly why they got renamed apart, to avoid the collision), so this
+    can find them with a single join rather than a manual per-user fix.
+    Called on every backend startup — cheap no-op once nothing's missing.
+    Returns the number of accounts backfilled, for the startup log.
+    """
+    with get_connection() as conn:
+        missing = conn.execute(
+            "SELECT u.user_id, u.email FROM users u "
+            "LEFT JOIN bank_customers b ON u.user_id = b.user_id "
+            "WHERE b.user_id IS NULL"
+        ).fetchall()
+
+    for row in missing:
+        provision_demo_account(row["user_id"], full_name="New Customer", email=row["email"])
+    return len(missing)
+
+
 def print_summary() -> None:
     with get_connection() as conn:
         for table in ("bank_customers", "accounts", "cards", "transactions"):
