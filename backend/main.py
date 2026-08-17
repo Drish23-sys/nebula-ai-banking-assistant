@@ -393,19 +393,30 @@ def chat_reset(user: Dict[str, Any] = Depends(require_user)) -> Dict[str, str]:
 
     try:
         config = {"configurable": {"thread_id": session_id}}
-        compiled_graph.update_state(
-            config,
-            {
-                "is_handover_active": False,
-                "unclear_attempts": 0,
-                "out_of_scope_attempts": 0,
-                "handover_reason": None,
-                "handover_summary": None,
-                "topic_stack": [],
-                "active_intent": "",
-                "retrieved_docs": [],
-            },
-        )
+        # Bug fix: calling update_state() on a thread with NO existing
+        # checkpoint (e.g. a customer hits reset before ever sending a
+        # real message in this session) was creating a *partial*
+        # checkpoint containing only these reset fields — missing
+        # user_id, session_id, and everything else AgentState needs.
+        # The next real /chat call then saw a non-empty checkpoint and
+        # skipped new_state() (which normally fills those in), crashing
+        # with KeyError: 'user_id' inside tool_node. Only reset if a
+        # real checkpoint already exists; a brand-new thread has nothing
+        # to reset anyway.
+        if compiled_graph.get_state(config).values:
+            compiled_graph.update_state(
+                config,
+                {
+                    "is_handover_active": False,
+                    "unclear_attempts": 0,
+                    "out_of_scope_attempts": 0,
+                    "handover_reason": None,
+                    "handover_summary": None,
+                    "topic_stack": [],
+                    "active_intent": "",
+                    "retrieved_docs": [],
+                },
+            )
     except Exception as exc:
         print(f"[chat_reset] Failed to reset graph state for {session_id}: {exc}")
 
